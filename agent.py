@@ -15,6 +15,7 @@ from rich.live import Live
 from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.rule import Rule
+from rich.spinner import Spinner
 from rich.text import Text
 
 from providers import PROVIDERS, get_client
@@ -31,6 +32,25 @@ _SILVER = "#94a3b8"
 _AMBER  = "#fbbf24"
 _RED    = "#ef4444"
 _VIOLET = "#a78bfa"
+_BLUE   = "#60a5fa"
+_CYAN   = "#22d3ee"
+_ORANGE = "#fb923c"
+
+# ── tool icons ────────────────────────────────────────────────────────────────
+_TOOL_ICONS: dict[str, str] = {
+    "think":         "🧠",
+    "web_search":    "🔍",
+    "browser":       "🌐",
+    "run_shell":     "🖥 ",
+    "run_python":    "🐍",
+    "http_fetch":    "📡",
+    "read_file":     "📄",
+    "write_file":    "✏ ",
+    "edit_file":     "🔧",
+    "list_dir":      "📂",
+    "calculate":     "🧮",
+}
+_DEFAULT_ICON = "⚙ "
 
 _BANNER = """\
 [bold #39ff14] ██╗   ██╗██╗██████╗ ███████╗██████╗ [/bold #39ff14]
@@ -47,9 +67,14 @@ _MAX_ITERATIONS        = 20       # tool-call rounds per user turn
 
 # ── dangerous shell patterns ──────────────────────────────────────────────────
 _DANGEROUS_RE = re.compile(
-    r"\brm\s+-[rRfF]"
-    r"|rmdir\s+/[sqSQ]"
-    r"|del\s+/[fFqQ]"
+    r"\brm\s+-[rRfF]"           # rm -rf / rm -fr
+    r"|\brm\b.*\*"              # rm with wildcard
+    r"|rmdir\s+/[sqSQ]"         # rmdir /s /q
+    r"|\brmdir\b"               # plain rmdir (always destructive)
+    r"|del\s+/[fFqQ]"           # del /f /q
+    r"|\bdel\b.*\*"             # del with wildcard
+    r"|\bRemove-Item\b"         # PowerShell Remove-Item
+    r"|\bri\b.*-[rR]"           # ri alias with -Recurse
     r"|\bformat\s+[a-zA-Z]:"
     r"|\bdd\s+if="
     r"|DROP\s+(TABLE|DATABASE)"
@@ -124,6 +149,14 @@ def _panel(text: str) -> Panel:
 
 
 # ── streaming ─────────────────────────────────────────────────────────────────
+def _spinner_text(label: str) -> Text:
+    t = Text()
+    t.append("  ")
+    t.append(Spinner("dots", style=f"bold {_CYAN}").render(time.time()))
+    t.append(f"  {label}", style=f"dim {_SILVER}")
+    return t
+
+
 def _stream(client, model: str, messages: list, use_tools: bool = True):
     """Stream API response. Returns (text, tool_calls)."""
     full_text = ""
@@ -133,8 +166,13 @@ def _stream(client, model: str, messages: list, use_tools: bool = True):
     if use_tools:
         kwargs["tools"] = TOOL_DEFINITIONS
 
-    live = Live(console=console, refresh_per_second=20)
-    started = False
+    # Phase 1: spinner while waiting for first byte
+    waiting_spinner = Spinner("dots", text=Text(f"  thinking…", style=f"dim {_SILVER}"), style=f"bold {_CYAN}")
+    live = Live(waiting_spinner, console=console, refresh_per_second=20)
+    live.start()
+
+    got_first = False
+    streaming_live = False
 
     try:
         for chunk in client.chat.completions.create(**kwargs):
@@ -144,12 +182,17 @@ def _stream(client, model: str, messages: list, use_tools: bool = True):
 
             if delta.content:
                 full_text += delta.content
-                if not started:
-                    live.start()
-                    started = True
-                live.update(_panel(full_text))
+                if not got_first:
+                    # Switch from spinner to streaming panel
+                    live.update(_panel(full_text))
+                    got_first = True
+                    streaming_live = True
+                else:
+                    live.update(_panel(full_text))
 
             if delta.tool_calls:
+                if not got_first:
+                    got_first = True  # tool-only response, stop spinner
                 for tc in delta.tool_calls:
                     i = tc.index
                     if i not in tc_map:
@@ -167,53 +210,76 @@ def _stream(client, model: str, messages: list, use_tools: bool = True):
                             tc_map[i]["function"]["arguments"] += tc.function.arguments
 
     except Exception as e:
-        if started:
-            live.stop()
+        live.stop()
         msg = str(e).lower()
         if use_tools and any(w in msg for w in ("tool", "function", "unsupported")):
-            console.print("[dim] ↻  retrying without tools[/dim]")
+            _show_retry("without tools (provider doesn't support tool-calling)")
             return _stream(client, model, messages, use_tools=False)
         console.print(f"\n  [bold {_RED}]error:[/bold {_RED}] {e}\n")
         return "", []
 
-    if started:
-        live.stop()
+    live.stop()
+    if streaming_live:
         console.print()
 
     return full_text, [tc_map[i] for i in sorted(tc_map)]
 
 
 # ── tool display ──────────────────────────────────────────────────────────────
+def _tool_icon(name: str) -> str:
+    return _TOOL_ICONS.get(name, _DEFAULT_ICON)
+
+
 def _show_tool_call(name: str, args: dict) -> None:
+    icon = _tool_icon(name)
     parts = []
     for k, v in list(args.items())[:2]:
-        v_str = f'"{v[:60]}"' if isinstance(v, str) else repr(v)[:60]
-        parts.append(f"{k}={v_str}")
+        v_str = f'"{v[:55]}"' if isinstance(v, str) else repr(v)[:55]
+        parts.append(f"[dim]{k}=[/dim][{_SILVER}]{v_str}[/{_SILVER}]")
+    hint = ("  " + "  ".join(parts)) if parts else ""
     console.print(
-        f"  [bold {_AMBER}]⚡[/bold {_AMBER}]  "
-        f"[{_AMBER}]{name}[/{_AMBER}]"
-        f"  [dim]{', '.join(parts)}[/dim]"
+        f"  {icon}  [bold {_AMBER}]{name}[/bold {_AMBER}]{hint}"
     )
 
 
 def _show_tool_done(name: str, elapsed: float) -> None:
+    icon = _tool_icon(name)
     console.print(
-        f"  [bold green]✓[/bold green]  "
-        f"[dim]{name}  {elapsed:.1f}s[/dim]"
+        f"  {icon}  [bold {_GREEN}]done[/bold {_GREEN}]  "
+        f"[dim]{name}  [{elapsed:.2f}s][/dim]"
+    )
+
+
+def _show_tool_error(name: str, elapsed: float) -> None:
+    icon = _tool_icon(name)
+    console.print(
+        f"  {icon}  [bold {_RED}]error[/bold {_RED}]  "
+        f"[dim]{name}  [{elapsed:.2f}s][/dim]"
     )
 
 
 def _show_thought(thought: str) -> None:
-    console.print(f"  [bold {_VIOLET}]◆ thinking[/bold {_VIOLET}]")
-    for line in thought.strip().splitlines():
-        console.print(f"  [{_VIOLET}]│[/{_VIOLET}] [dim]{line}[/dim]")
+    lines = thought.strip().splitlines()
+    console.print(f"  🧠  [bold {_VIOLET}]thinking[/bold {_VIOLET}]")
+    for line in lines:
+        console.print(f"     [{_VIOLET}]│[/{_VIOLET}] [dim]{line}[/dim]")
+    console.print(f"     [{_VIOLET}]╰{'─' * 40}[/{_VIOLET}]")
     console.print()
+
+
+def _show_acting(iteration: int) -> None:
+    console.print(f"\n  [dim {_CYAN}]── acting · round {iteration} {'─' * 30}[/dim {_CYAN}]")
+
+
+def _show_retry(reason: str) -> None:
+    console.print(f"  🔄  [dim {_ORANGE}]retrying  {reason}[/dim {_ORANGE}]")
 
 
 # ── dangerous command guard ───────────────────────────────────────────────────
 def _confirm_dangerous(command: str) -> bool:
     console.print(
-        f"\n  [bold {_RED}]⚠  dangerous command[/bold {_RED}]\n"
+        f"\n  🚨  [bold {_RED}]dangerous command[/bold {_RED}]\n"
+        f"  [dim {_RED}]{'─' * 50}[/dim {_RED}]\n"
         f"  [dim]{command[:200]}[/dim]\n"
     )
     try:
@@ -260,6 +326,43 @@ def _run_tools(calls: list[tuple[str, dict, str]]) -> list[str]:
         result = execute_tool(name, args)
         return idx, _truncate_result(result), time.time() - t0
 
+    def _run_one_with_spinner(idx: int, name: str, args: dict) -> tuple[int, str, float]:
+        """Run a single tool while showing an inline spinner."""
+        if not vetted[idx]:
+            return idx, "Cancelled by user.", 0.0
+        icon = _tool_icon(name)
+        spinner = Spinner("dots", style=f"bold {_CYAN}")
+        label = Text(f"  {icon}  {name}  ", style=f"{_AMBER}")
+        label.append("running…", style=f"dim {_SILVER}")
+
+        def _renderable():
+            s = spinner.render(time.time())
+            row = Text()
+            row.append("  ")
+            row.append_text(Text.assemble(s, " "))
+            row.append_text(label)
+            return row
+
+        t0 = time.time()
+        with Live(_renderable(), console=console, refresh_per_second=20, transient=True) as live:
+            import threading
+            done = threading.Event()
+
+            def _worker():
+                nonlocal _result
+                _result = execute_tool(name, args)
+                done.set()
+
+            _result = ""
+            t = threading.Thread(target=_worker, daemon=True)
+            t.start()
+            while not done.wait(timeout=0.05):
+                live.update(_renderable())
+            t.join()
+
+        elapsed = time.time() - t0
+        return idx, _truncate_result(_result), elapsed
+
     # Execute think calls first (silent, just display the thought)
     for i in think_indices:
         _, result, _ = _run_one(i, "think", calls[i][1])
@@ -267,10 +370,10 @@ def _run_tools(calls: list[tuple[str, dict, str]]) -> list[str]:
         if _think_verbose():
             _show_thought(calls[i][1].get("thought", ""))
 
-    # Execute action tools (parallel when multiple)
+    # Execute action tools — spinner for single, parallel for multiple
     if len(action_indices) == 1:
         i = action_indices[0]
-        idx, result, elapsed = _run_one(i, calls[i][0], calls[i][1])
+        idx, result, elapsed = _run_one_with_spinner(i, calls[i][0], calls[i][1])
         _show_tool_done(calls[i][0], elapsed)
         results[i] = result
     elif action_indices:
@@ -420,6 +523,8 @@ def chat(client, model: str, provider: str, resume: bool = False, cwd: str = Non
         # Agentic loop — capped at _MAX_ITERATIONS tool-call rounds
         for _iter in range(_MAX_ITERATIONS):
             state["messages"] = _prune_context(state["messages"])
+            if _iter > 0:
+                _show_acting(_iter + 1)
             text, tool_calls = _stream(client, state["model"], state["messages"])
 
             if tool_calls:
@@ -451,7 +556,7 @@ def chat(client, model: str, provider: str, resume: bool = False, cwd: str = Non
 
                 if _iter == _MAX_ITERATIONS - 1:
                     console.print(
-                        f"  [bold {_RED}]⚠  hit {_MAX_ITERATIONS}-iteration cap[/bold {_RED}]\n"
+                        f"\n  ⛔  [bold {_RED}]hit {_MAX_ITERATIONS}-round cap — stopping[/bold {_RED}]\n"
                     )
                     break
 
