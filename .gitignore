@@ -44,5 +44,6 @@ desktop.ini
 # Temp files from run_python tool
 tmp*.py
 
-# Claude
-CLAUDE.md
+
+#PDF
+*.pdf

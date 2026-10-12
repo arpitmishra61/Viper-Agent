@@ -1,6 +1,8 @@
 import atexit
 import time
 
+from tools.guardrails import check_url
+
 _pw = None
 _browser = None
 _page = None
@@ -77,6 +79,9 @@ def browser(action: str, url: str = None, text: str = None,
 
     try:
         if action == "navigate":
+            blocked = check_url(url) if url else None
+            if blocked:
+                return blocked
             page.goto(url, wait_until="domcontentloaded")
             if not headless:
                 time.sleep(0.5)

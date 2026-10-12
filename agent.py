@@ -10,6 +10,12 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
+try:
+    from cryptography.fernet import Fernet as _Fernet
+    _CRYPTO_OK = True
+except ImportError:
+    _CRYPTO_OK = False
+
 from rich.console import Console
 from rich.live import Live
 from rich.markdown import Markdown
@@ -23,6 +29,7 @@ from system_prompt import SYSTEM_PROMPT
 from tools import TOOL_DEFINITIONS, execute_tool
 from tools.state import get_cwd, set_cwd
 from tools.think import is_verbose as _think_verbose, set_verbose as _think_set_verbose
+from tools.guardrails import EXTERNAL_TOOLS, detect_pii, detect_injection, tag_external, scan_python_code
 
 console = Console(highlight=False)
 
@@ -83,8 +90,42 @@ _DANGEROUS_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Deeper shell patterns — obfuscated execution, reverse shells, SSRF via shell
+_DEEP_DANGEROUS_RE = re.compile(
+    r"(?:curl|wget)\b[^|\n]{0,200}\|\s*(?:ba|z|da|fi|k)?sh\b"   # curl/wget | bash
+    r"|bash\s+<\s*\(\s*(?:curl|wget)"                            # bash <(curl ...)
+    r"|base64\b.*-d.*\|\s*(?:ba|z)?sh"                          # base64 -d | bash
+    r"|\bnc\b.*-e\s+/(?:bin|usr)"                               # netcat reverse shell
+    r"|:\(\)\s*\{\s*:\|:&\s*\}"                                 # fork bomb
+    r"|(?:curl|wget)\b.*\$\{?\w*(?:KEY|TOKEN|SECRET|PASS)\w*\}?"  # env-var exfil via curl
+    r"|>\s*/(?:etc|bin|sbin|usr/bin)/"                          # write to system dirs
+    r"|(?i)Invoke-Expression\s*\(.*(?:Net\.WebClient|DownloadString)"  # PS download+exec
+    r"|(?i)iex\s*\(.*(?:Net\.WebClient|DownloadString)",        # iex shorthand
+    re.IGNORECASE,
+)
+
+# ── session rate limiter ───────────────────────────────────────────────────────
+_session_tool_calls: int = 0
+_MAX_SESSION_TOOL_CALLS: int = 200
+
 # ── session storage ───────────────────────────────────────────────────────────
 _SESSIONS_DIR = Path.home() / ".viper" / "sessions"
+_KEY_PATH     = Path.home() / ".viper" / ".key"
+
+
+def _get_or_create_key() -> bytes:
+    """Return the Fernet encryption key for session files, generating it on first use."""
+    if _KEY_PATH.exists():
+        return _KEY_PATH.read_bytes()
+    key = _Fernet.generate_key()
+    _KEY_PATH.parent.mkdir(parents=True, exist_ok=True)
+    _KEY_PATH.write_bytes(key)
+    try:
+        import stat as _stat
+        _KEY_PATH.chmod(_stat.S_IRUSR | _stat.S_IWUSR)  # owner-only on Unix
+    except Exception:
+        pass
+    return key
 
 
 # ── token helpers ─────────────────────────────────────────────────────────────
@@ -119,21 +160,30 @@ def _truncate_result(result: str) -> str:
 def _save_session(messages: list, provider: str, model: str) -> Path:
     _SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
     ts = time.strftime("%Y%m%d_%H%M%S")
-    path = _SESSIONS_DIR / f"{ts}.json"
-    path.write_text(
-        json.dumps({"provider": provider, "model": model, "messages": messages}, indent=2),
-        encoding="utf-8",
-    )
+    payload = json.dumps(
+        {"provider": provider, "model": model, "messages": messages}, indent=2
+    ).encode()
+    if _CRYPTO_OK:
+        path = _SESSIONS_DIR / f"{ts}.viper"
+        path.write_bytes(_Fernet(_get_or_create_key()).encrypt(payload))
+    else:
+        path = _SESSIONS_DIR / f"{ts}.json"
+        path.write_bytes(payload)
     return path
 
 
 def _load_last_session() -> dict | None:
     if not _SESSIONS_DIR.exists():
         return None
-    files = sorted(_SESSIONS_DIR.glob("*.json"))
-    if not files:
-        return None
-    return json.loads(files[-1].read_text(encoding="utf-8"))
+    # Prefer encrypted sessions; fall back to legacy plain JSON
+    encrypted = sorted(_SESSIONS_DIR.glob("*.viper"))
+    if encrypted and _CRYPTO_OK:
+        data = _Fernet(_get_or_create_key()).decrypt(encrypted[-1].read_bytes())
+        return json.loads(data.decode())
+    plain = sorted(_SESSIONS_DIR.glob("*.json"))
+    if plain:
+        return json.loads(plain[-1].read_text(encoding="utf-8"))
+    return None
 
 
 # ── rendering ─────────────────────────────────────────────────────────────────
@@ -275,7 +325,30 @@ def _show_retry(reason: str) -> None:
     console.print(f"  🔄  [dim {_ORANGE}]retrying  {reason}[/dim {_ORANGE}]")
 
 
+def _show_pii_found(source: str, types: list[str]) -> None:
+    console.print(
+        f"  🔒  [bold {_AMBER}]pii detected[/bold {_AMBER}]  "
+        f"[dim]{source}  ·  {', '.join(types)}[/dim]"
+    )
+
+
 # ── dangerous command guard ───────────────────────────────────────────────────
+def _confirm_python(code: str, dangers: list[str]) -> bool:
+    preview = code[:300].replace("\n", " ↵ ")
+    console.print(
+        f"\n  🐍  [bold {_RED}]dangerous python patterns[/bold {_RED}]\n"
+        f"  [dim {_RED}]{'─' * 50}[/dim {_RED}]\n"
+        f"  [dim]{'; '.join(dangers)}[/dim]\n"
+        f"  [dim]{preview}[/dim]\n"
+    )
+    try:
+        ans = console.input(
+            f"  [{_SILVER}]execute anyway? (yes/no)[/{_SILVER}]  [{_GREEN}]›[/{_GREEN}]  "
+        ).strip().lower()
+        console.print()
+        return ans in ("yes", "y")
+    except (KeyboardInterrupt, EOFError):
+        return False
 def _confirm_dangerous(command: str) -> bool:
     console.print(
         f"\n  🚨  [bold {_RED}]dangerous command[/bold {_RED}]\n"
@@ -299,11 +372,31 @@ def _run_tools(calls: list[tuple[str, dict, str]]) -> list[str]:
     if n == 0:
         return []
 
-    # Dangerous check upfront (serial, needs user input)
+    # ── rate limiter ──────────────────────────────────────────────────────────
+    global _session_tool_calls
+    action_count = sum(1 for name, _, _ in calls if name != "think")
+    _session_tool_calls += action_count
+    if _session_tool_calls > _MAX_SESSION_TOOL_CALLS:
+        console.print(
+            f"\n  ⛔  [bold {_RED}]rate limit — {_MAX_SESSION_TOOL_CALLS} tool calls per session exceeded[/bold {_RED}]\n"
+        )
+        return [f"[BLOCKED — session rate limit of {_MAX_SESSION_TOOL_CALLS} tool calls exceeded]"] * len(calls)
+
+    # ── pre-execution vetting (serial — needs user input) ─────────────────────
     vetted: list[bool] = []
     for name, args, _ in calls:
-        if name == "run_shell" and _DANGEROUS_RE.search(args.get("command", "")):
-            vetted.append(_confirm_dangerous(args.get("command", "")))
+        if name == "run_shell":
+            cmd = args.get("command", "")
+            if _DANGEROUS_RE.search(cmd) or _DEEP_DANGEROUS_RE.search(cmd):
+                vetted.append(_confirm_dangerous(cmd))
+            else:
+                vetted.append(True)
+        elif name == "run_python":
+            dangers = scan_python_code(args.get("code", ""))
+            if dangers:
+                vetted.append(_confirm_python(args.get("code", ""), dangers))
+            else:
+                vetted.append(True)
         else:
             vetted.append(True)
 
@@ -386,6 +479,43 @@ def _run_tools(calls: list[tuple[str, dict, str]]) -> list[str]:
                 idx, result, elapsed = fut.result()
                 _show_tool_done(calls[idx][0], elapsed)
                 results[idx] = result
+
+    # ── security guardrails ────────────────────────────────────────────────────
+    for i, (name, _args, _tid) in enumerate(calls):
+        result = results[i]
+        if result is None or name in ("think", "calculate"):
+            continue
+
+        # 1. Warn about PII in tool output (informational; model still sees it)
+        pii = detect_pii(result)
+        if pii.has_pii:
+            _show_pii_found(name, pii.found)
+
+        # 2. Detect prompt-injection in tool output; ask user before injecting
+        #    adversarial content into the model's context.
+        inj = detect_injection(result)
+        if inj.suspicious:
+            console.print(
+                f"\n  🚨  [bold {_RED}]prompt injection detected — [{name}] output[/bold {_RED}]"
+            )
+            for cat, snippet in inj.matches[:3]:
+                console.print(f"  [dim {_RED}]  [{cat}]: {snippet!r}[/dim {_RED}]")
+            try:
+                ans = console.input(
+                    f"  [{_SILVER}]include in context? (yes/no)[/{_SILVER}]  [{_GREEN}]›[/{_GREEN}]  "
+                ).strip().lower()
+                console.print()
+                if ans not in ("yes", "y"):
+                    result = f"[BLOCKED — prompt injection detected in {name} output, content withheld]"
+            except (EOFError, KeyboardInterrupt):
+                result = f"[BLOCKED — prompt injection detected in {name} output, content withheld]"
+                console.print()
+
+        # 3. Tag all external tool output so the model knows it is untrusted
+        if name in EXTERNAL_TOOLS:
+            result = tag_external(name, result)
+
+        results[i] = result
 
     return results
 
@@ -516,6 +646,26 @@ def chat(client, model: str, provider: str, resume: bool = False, cwd: str = Non
         if user_input.startswith("/"):
             _handle_slash(user_input, state)
             continue
+
+        # ── PII guard on user input ────────────────────────────────────────────
+        pii = detect_pii(user_input)
+        if pii.has_pii:
+            console.print(
+                f"\n  ⚠️   [bold {_AMBER}]PII detected in your message[/bold {_AMBER}]  "
+                f"[dim]{', '.join(pii.found)}[/dim]\n"
+                f"  [dim]This will be sent to the LLM provider ({provider}). Proceed?[/dim]"
+            )
+            try:
+                ans = console.input(
+                    f"  [{_SILVER}](yes/no)[/{_SILVER}]  [{_GREEN}]›[/{_GREEN}]  "
+                ).strip().lower()
+                console.print()
+                if ans not in ("yes", "y"):
+                    console.print(f"  [dim]message cancelled[/dim]\n")
+                    continue
+            except (KeyboardInterrupt, EOFError):
+                console.print()
+                continue
 
         state["messages"].append({"role": "user", "content": user_input})
         console.print()

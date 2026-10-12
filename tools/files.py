@@ -1,9 +1,14 @@
 from pathlib import Path
 
+from tools.guardrails import check_path
+
 _MAX_READ_BYTES = 50 * 1024  # 50 KB
 
 
 def read_file(path: str) -> str:
+    blocked = check_path(path)
+    if blocked:
+        return blocked
     try:
         p = Path(path).expanduser().resolve()
         if not p.exists():
@@ -22,6 +27,9 @@ def read_file(path: str) -> str:
 
 
 def write_file(path: str, content: str, mode: str = "overwrite") -> str:
+    blocked = check_path(path)
+    if blocked:
+        return blocked
     try:
         p = Path(path).expanduser().resolve()
         p.parent.mkdir(parents=True, exist_ok=True)
@@ -35,6 +43,9 @@ def write_file(path: str, content: str, mode: str = "overwrite") -> str:
 
 
 def edit_file(path: str, old_string: str, new_string: str) -> str:
+    blocked = check_path(path)
+    if blocked:
+        return blocked
     try:
         p = Path(path).expanduser().resolve()
         if not p.exists():
@@ -52,6 +63,9 @@ def edit_file(path: str, old_string: str, new_string: str) -> str:
 
 
 def list_dir(path: str = ".", pattern: str = "*", recursive: bool = False) -> str:
+    blocked = check_path(path)
+    if blocked:
+        return blocked
     try:
         p = Path(path).expanduser().resolve()
         if not p.exists():

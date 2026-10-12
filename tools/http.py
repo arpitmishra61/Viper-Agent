@@ -2,12 +2,17 @@ import json
 import urllib.error
 import urllib.request
 
+from tools.guardrails import check_url
+
 _TIMEOUT = 15
 _MAX_BYTES = 100 * 1024  # 100 KB
 
 
 def http_fetch(url: str, method: str = "GET", headers: dict = None,
                body: str = None, json_body: dict = None) -> str:
+    blocked = check_url(url)
+    if blocked:
+        return blocked
     try:
         data = None
         req_headers = {"User-Agent": "pi-agent/1.0"}
