@@ -45,17 +45,27 @@ _ORANGE = "#fb923c"
 
 # ── tool icons ────────────────────────────────────────────────────────────────
 _TOOL_ICONS: dict[str, str] = {
-    "think":         "🧠",
-    "web_search":    "🔍",
-    "browser":       "🌐",
-    "run_shell":     "🖥 ",
-    "run_python":    "🐍",
-    "http_fetch":    "📡",
-    "read_file":     "📄",
-    "write_file":    "✏ ",
-    "edit_file":     "🔧",
-    "list_dir":      "📂",
-    "calculate":     "🧮",
+    "think":                        "🧠",
+    "web_search":                   "🔍",
+    "browser":                      "🌐",
+    "run_shell":                    "🖥 ",
+    "run_python":                   "🐍",
+    "http_fetch":                   "📡",
+    "read_file":                    "📄",
+    "write_file":                   "✏ ",
+    "edit_file":                    "🔧",
+    "list_dir":                     "📂",
+    "calculate":                    "🧮",
+    "github_set_token":             "🔑",
+    "github_get_repo":              "🐙",
+    "github_list_issues":           "🐙",
+    "github_get_issue":             "🐙",
+    "github_comment_issue":         "💬",
+    "github_get_file":              "🐙",
+    "github_create_or_update_file": "🐙",
+    "github_list_prs":              "🔀",
+    "github_create_pr":             "🔀",
+    "github_clone_repo":            "📦",
 }
 _DEFAULT_ICON = "⚙ "
 
@@ -99,8 +109,8 @@ _DEEP_DANGEROUS_RE = re.compile(
     r"|:\(\)\s*\{\s*:\|:&\s*\}"                                 # fork bomb
     r"|(?:curl|wget)\b.*\$\{?\w*(?:KEY|TOKEN|SECRET|PASS)\w*\}?"  # env-var exfil via curl
     r"|>\s*/(?:etc|bin|sbin|usr/bin)/"                          # write to system dirs
-    r"|(?i)Invoke-Expression\s*\(.*(?:Net\.WebClient|DownloadString)"  # PS download+exec
-    r"|(?i)iex\s*\(.*(?:Net\.WebClient|DownloadString)",        # iex shorthand
+    r"|Invoke-Expression\s*\(.*(?:Net\.WebClient|DownloadString)"  # PS download+exec
+    r"|iex\s*\(.*(?:Net\.WebClient|DownloadString)",        # iex shorthand
     re.IGNORECASE,
 )
 
@@ -520,6 +530,50 @@ def _run_tools(calls: list[tuple[str, dict, str]]) -> list[str]:
     return results
 
 
+# ── multi-agent orchestration ─────────────────────────────────────────────────
+def _run_multi_agent(request: str, state: dict) -> None:
+    """Invoke sublayer orchestration: plan → parallel workers → aggregate."""
+    from orchestrator import OrchestratorAgent  # lazy import keeps startup fast
+
+    client = get_client(state["provider"])[0]
+    orch   = OrchestratorAgent(client, state["model"], max_retries=2, max_workers=4)
+
+    console.print(f"\n  🧩  [bold {_VIOLET}]orchestrating[/bold {_VIOLET}]  [dim]{request[:60]}[/dim]\n")
+
+    def _on_plan(tasks):
+        console.print(f"  📋  [dim]{len(tasks)} agents planned:[/dim]")
+        for t in tasks:
+            needs = "tools" if t.tools else "no tools"
+            model_hint = t.model.split("/")[-1] if t.model else "?"
+            console.print(
+                f"       [{_AMBER}]{t.id}[/{_AMBER}]  {t.role}"
+                f"  [dim]{model_hint}  ·  {needs}[/dim]"
+            )
+        console.print()
+
+    def _on_result(result):
+        icon  = "✅" if result.success else "❌"
+        extra = f"  [dim](attempt {result.attempts})[/dim]" if result.attempts > 1 else ""
+        console.print(
+            f"  {icon}  [{_GREEN if result.success else _RED}]{result.role}[/]"
+            f"  [dim]{result.task_id}[/dim]{extra}"
+        )
+
+    try:
+        answer = orch.execute(request, on_plan=_on_plan, on_result=_on_result)
+    except Exception as exc:
+        console.print(f"\n  [bold {_RED}]orchestration error:[/bold {_RED}] {exc}\n")
+        return
+
+    console.print()
+    console.print(_panel(answer))
+    console.print()
+
+    # Inject the final answer into the main conversation so context is preserved
+    state["messages"].append({"role": "user",      "content": f"[/multi] {request}"})
+    state["messages"].append({"role": "assistant",  "content": answer})
+
+
 # ── slash commands ────────────────────────────────────────────────────────────
 _HELP_TEXT = (
     f"  [bold {_GREEN}]/clear[/bold {_GREEN}]          wipe conversation history\n"
@@ -529,6 +583,7 @@ _HELP_TEXT = (
     f"  [bold {_GREEN}]/cwd[/bold {_GREEN}]   [dim][path][/dim]    show or change working directory\n"
     f"  [bold {_GREEN}]/tokens[/bold {_GREEN}]         show context size\n"
     f"  [bold {_GREEN}]/think[/bold {_GREEN}]          toggle visible thinking on/off\n"
+    f"  [bold {_GREEN}]/multi[/bold {_GREEN}] [dim]<request>[/dim] run multi-agent orchestration\n"
     f"  [bold {_GREEN}]/help[/bold {_GREEN}]           show this message"
 )
 
@@ -591,6 +646,12 @@ def _handle_slash(raw: str, state: dict) -> None:
         status = f"[bold {_VIOLET}]on[/bold {_VIOLET}]" if new_state else "off"
         console.print(f"  [dim]thinking display {status}[/dim]\n")
 
+    elif name == "/multi":
+        if not arg:
+            console.print(f"  [dim]usage: /multi <request>[/dim]\n")
+            return
+        _run_multi_agent(arg, state)
+
     elif name == "/help":
         console.print(f"\n{_HELP_TEXT}\n")
 
@@ -602,6 +663,10 @@ def _handle_slash(raw: str, state: dict) -> None:
 def chat(client, model: str, provider: str, resume: bool = False, cwd: str = None):
     if cwd:
         set_cwd(os.path.abspath(cwd))
+
+    # Give spawn_agents tool access to the live client + model
+    from tools.multiagent import init as _init_multiagent
+    _init_multiagent(client, model)
 
     system_msg = {"role": "system", "content": SYSTEM_PROMPT}
     messages = [system_msg]

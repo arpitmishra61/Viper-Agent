@@ -7,7 +7,13 @@ from tools.state import get_cwd
 _DEFAULT_TIMEOUT = 30
 
 
-def run_python(code: str, packages: list = None, timeout: int = _DEFAULT_TIMEOUT) -> str:
+def run_python(code: str, packages: list = None, timeout: int = _DEFAULT_TIMEOUT,
+               sandbox: bool = False) -> str:
+    # Delegate to E2B sandbox when requested
+    if sandbox:
+        from tools.sandbox import run_python_in_sandbox
+        return run_python_in_sandbox(code, packages=packages, timeout=min(timeout, 120))
+
     if packages:
         for pkg in packages:
             try:
@@ -83,6 +89,16 @@ DEFINITIONS = [
                         "type": "integer",
                         "description": "Max seconds to run (default 30, max 120)",
                         "default": 30,
+                    },
+                    "sandbox": {
+                        "type": "boolean",
+                        "description": (
+                            "Run in an isolated E2B cloud microVM instead of the user's machine. "
+                            "Use when: running untrusted or internet-sourced code, data processing "
+                            "on sensitive inputs, anything risky. Shares the same sandbox filesystem "
+                            "as sandboxed run_shell calls in the same session."
+                        ),
+                        "default": False,
                     },
                 },
                 "required": ["code"],

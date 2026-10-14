@@ -8,7 +8,13 @@ _DEFAULT_TIMEOUT = 60
 _CD_RE = re.compile(r'^cd\s*(.*)', re.IGNORECASE)
 
 
-def run_shell(command: str, cwd: str = None, timeout: int = _DEFAULT_TIMEOUT) -> str:
+def run_shell(command: str, cwd: str = None, timeout: int = _DEFAULT_TIMEOUT,
+              sandbox: bool = False) -> str:
+    # Delegate to E2B sandbox when requested
+    if sandbox:
+        from tools.sandbox import run_shell_in_sandbox
+        return run_shell_in_sandbox(command, timeout=min(timeout, 300))
+
     effective_cwd = cwd or get_cwd()
     cmd = command.strip()
 
@@ -72,6 +78,17 @@ DEFINITIONS = [
                         "type": "integer",
                         "description": "Max seconds to wait (default 60, max 300)",
                         "default": 60,
+                    },
+                    "sandbox": {
+                        "type": "boolean",
+                        "description": (
+                            "Run in an isolated E2B cloud microVM instead of the user's machine. "
+                            "Use when: cloning or modifying git repos, running code from the internet, "
+                            "long build/test/install operations, anything risky or potentially destructive. "
+                            "The sandbox persists for the session — files written in one call are visible "
+                            "to subsequent sandboxed calls."
+                        ),
+                        "default": False,
                     },
                 },
                 "required": ["command"],

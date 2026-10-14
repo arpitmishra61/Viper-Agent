@@ -335,10 +335,71 @@ Think calls always run first (serially) so reasoning informs parallel actions.
 
 ---
 
+---
+
+## E2B sandbox integration
+
+### What it is
+`tools/sandbox.py` wraps the E2B SDK to provide a persistent cloud microVM for the session.
+When the model passes `sandbox=True` to `run_shell` or `run_python`, the call is routed to the
+E2B sandbox instead of the user's local machine. The sandbox starts on first use and lives for
+1 hour (configurable via `Sandbox(timeout=...)`) unless killed earlier.
+
+### Why per-call instead of always-on
+The model knows best when isolation is needed. Simple queries (`git status`, `ls`, `pip show`)
+have no reason to pay the sandbox startup cost or round-trip latency. The `sandbox=True`
+parameter lets the model opt in for exactly the tasks that warrant it.
+
+### When the model uses `sandbox=True`
+
+| Task | sandbox=True? | Why |
+|------|--------------|-----|
+| Clone a GitHub repo | ✅ | Repo code runs in isolation |
+| Run `npm install` / build | ✅ | Long operation, may pollute env |
+| Run a script from the internet | ✅ | Untrusted code |
+| Implement + test a fix for a GitHub issue | ✅ | Full dev workflow in isolation |
+| `git status` / `ls` | ❌ | Safe, local state check |
+| `pip show requests` | ❌ | Read-only, no risk |
+| Writing a local file | ❌ | `write_file` handles this locally |
+
+### Shared sandbox filesystem
+Both `run_shell(sandbox=True)` and `run_python(sandbox=True)` use the **same sandbox instance**.
+A repo cloned with sandboxed `run_shell` is visible to sandboxed `run_python` in the next call
+because they share `/home/user` in the same microVM.
+
+### Configuration
+Set `E2B_API_KEY` in `.env`. Get a key at https://e2b.dev.
+Install the package: `pip install e2b`.
+
+### Architecture
+```
+run_shell(command, sandbox=True)
+  → tools/shell.py: sandbox=True branch
+    → tools/sandbox.py: run_shell_in_sandbox()
+      → _get_sandbox() [lazy init, Sandbox(api_key, timeout=3600)]
+      → intercept `cd` → update _sbx_cwd
+      → sbx.commands.run(f"cd '{_sbx_cwd}' && {cmd}", timeout=...)
+      → return stdout/stderr/exit_code + "[sandbox]" suffix
+
+run_python(code, sandbox=True)
+  → tools/python_runner.py: sandbox=True branch
+    → tools/sandbox.py: run_python_in_sandbox()
+      → same singleton sandbox
+      → pip install packages if needed
+      → sbx.files.write("/tmp/_viper_run.py", code)
+      → sbx.commands.run("python3 /tmp/_viper_run.py")
+      → return output + "[sandbox]" suffix
+```
+
+All pre-execution guardrails (shell pattern checks, Python code scan) still fire before the
+sandboxed call — defense in depth matters even with isolation.
+
+---
+
 ## What's not built yet
 
-- True sandboxing for `run_python` and `run_shell` (Docker or seccomp) — the most impactful
-  remaining gap; all current guardrails are application-level
+- True local sandboxing (Docker/seccomp) — E2B covers the cloud case; local-only deployments
+  without E2B still execute run_shell/run_python on the host
 - Multi-agent support — spawning parallel subagents for independent subtasks
 - Streaming output for long-running shell commands (currently shows result only on completion)
 - Native token counting (currently uses chars/4 approximation; provider usage field varies)
