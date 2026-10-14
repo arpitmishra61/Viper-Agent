@@ -584,6 +584,7 @@ _HELP_TEXT = (
     f"  [bold {_GREEN}]/tokens[/bold {_GREEN}]         show context size\n"
     f"  [bold {_GREEN}]/think[/bold {_GREEN}]          toggle visible thinking on/off\n"
     f"  [bold {_GREEN}]/multi[/bold {_GREEN}] [dim]<request>[/dim] run multi-agent orchestration\n"
+    f"  [bold {_GREEN}]/pii[/bold {_GREEN}]   [dim][allow|block|reset] <Type>[/dim] manage PII warning suppression\n"
     f"  [bold {_GREEN}]/help[/bold {_GREEN}]           show this message"
 )
 
@@ -652,6 +653,49 @@ def _handle_slash(raw: str, state: dict) -> None:
             return
         _run_multi_agent(arg, state)
 
+    elif name == "/pii":
+        suppressed: set = state.setdefault("pii_suppressed", set())
+        parts2 = arg.split(None, 1)
+        subcmd = parts2[0].lower() if parts2 else ""
+        pii_type = parts2[1].strip() if len(parts2) > 1 else ""
+
+        if not subcmd or subcmd == "status":
+            if suppressed:
+                console.print(
+                    f"  [dim]PII warnings suppressed for: "
+                    f"[bold {_AMBER}]{', '.join(sorted(suppressed))}[/bold {_AMBER}][/dim]\n"
+                )
+            else:
+                console.print(f"  [dim]all PII warnings active[/dim]\n")
+
+        elif subcmd == "allow":
+            if not pii_type:
+                console.print(
+                    f"  [dim]usage: /pii allow <Type>  (e.g. /pii allow Email)[/dim]\n"
+                    f"  [dim]types: SSN, Credit Card, Phone, Email, API Key, Password[/dim]\n"
+                )
+            else:
+                suppressed.add(pii_type)
+                console.print(
+                    f"  [dim]PII warning for [bold {_AMBER}]{pii_type}[/bold {_AMBER}] suppressed this session[/dim]\n"
+                )
+
+        elif subcmd == "block":
+            if not pii_type:
+                console.print(f"  [dim]usage: /pii block <Type>[/dim]\n")
+            else:
+                suppressed.discard(pii_type)
+                console.print(
+                    f"  [dim]PII warning for [bold {_AMBER}]{pii_type}[/bold {_AMBER}] re-enabled[/dim]\n"
+                )
+
+        elif subcmd == "reset":
+            suppressed.clear()
+            console.print(f"  [dim]all PII warnings restored[/dim]\n")
+
+        else:
+            console.print(f"  [dim]unknown subcommand: {subcmd} — try /pii allow Email[/dim]\n")
+
     elif name == "/help":
         console.print(f"\n{_HELP_TEXT}\n")
 
@@ -714,11 +758,13 @@ def chat(client, model: str, provider: str, resume: bool = False, cwd: str = Non
 
         # ── PII guard on user input ────────────────────────────────────────────
         pii = detect_pii(user_input)
-        if pii.has_pii:
+        active_pii = [t for t in pii.found if t not in state.get("pii_suppressed", set())]
+        if active_pii:
             console.print(
                 f"\n  ⚠️   [bold {_AMBER}]PII detected in your message[/bold {_AMBER}]  "
-                f"[dim]{', '.join(pii.found)}[/dim]\n"
-                f"  [dim]This will be sent to the LLM provider ({provider}). Proceed?[/dim]"
+                f"[dim]{', '.join(active_pii)}[/dim]\n"
+                f"  [dim]This will be sent to the LLM provider ({provider}). Proceed?[/dim]\n"
+                f"  [dim](use /pii allow {active_pii[0]} to stop asking this session)[/dim]"
             )
             try:
                 ans = console.input(

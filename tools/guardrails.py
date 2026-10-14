@@ -190,12 +190,12 @@ def check_url(url: str) -> str | None:
     except Exception:
         return None  # let the tool's own error handling deal with malformed URLs
 
-    if not host:
-        return None
-
-    # Block non-HTTP(S) schemes from tool calls
+    # Block non-HTTP(S) schemes before any host check (file:// has no host)
     if scheme and scheme not in ("http", "https"):
         return f"URL scheme '{scheme}' not allowed — only http/https"
+
+    if not host:
+        return None
 
     # SSRF: resolve hostname and reject private / loopback IPs
     try:
