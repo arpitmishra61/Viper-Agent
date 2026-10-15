@@ -6,7 +6,6 @@ subsequent sandboxed calls because they share the same filesystem.
 """
 
 import atexit
-import os
 import re
 
 _sbx = None
@@ -16,14 +15,22 @@ _CD_RE = re.compile(r"^cd\s*(.*)", re.IGNORECASE)
 
 # ── sandbox lifecycle ──────────────────────────────────────────────────────────
 
-def _api_key() -> str:
-    key = os.environ.get("E2B_API_KEY", "")
-    if not key:
+def _api_key() -> tuple[str, bool]:
+    """Return (key, is_free_grant). A free grant counts against the user's quota."""
+    import auth
+    try:
+        key, note = auth.request_sandbox_key()
+    except auth.AuthError as e:
+        from rich.console import Console
+        Console(highlight=False).print(f"  [yellow]sandbox:[/yellow] {e}")
         raise RuntimeError(
-            "E2B_API_KEY is not set. Add it to .env or set the environment variable.\n"
-            "Get a key at https://e2b.dev"
+            f"Sandbox unavailable: {e} Tell the user this. Do not retry and do not "
+            "fall back to local execution."
         )
-    return key
+    if note:
+        from rich.console import Console
+        Console(highlight=False).print(f"  [dim]sandbox: {note}[/dim]")
+    return key, bool(note)
 
 
 def _get_sandbox():
@@ -34,9 +41,11 @@ def _get_sandbox():
             from e2b import Sandbox
         except ImportError:
             raise RuntimeError(
-                "e2b package not installed. Run: pip install e2b"
+                "e2b package not installed. Run: pip install \"viper-agent[sandbox]\""
             )
-        _sbx = Sandbox(api_key=_api_key(), timeout=3600)  # 1-hour session lifetime
+        key, free = _api_key()
+        # free grants get a shorter lifetime than a user's own key
+        _sbx = Sandbox(api_key=key, timeout=1800 if free else 3600)
         atexit.register(_kill_sandbox)
     return _sbx
 

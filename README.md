@@ -27,16 +27,33 @@ Viper is a ReAct agent — it reasons, calls tools, observes results, and loops 
 
 ## Quick start
 
+**Mac / Linux**
 ```bash
-git clone https://github.com/yourname/viper
-cd viper
-pip install -r requirements.txt
+curl -fsSL https://raw.githubusercontent.com/arpitmishra61/viper/main/install.sh | bash
+```
+
+**Windows (PowerShell)**
+```powershell
+iwr -useb https://raw.githubusercontent.com/arpitmishra61/viper/main/install.ps1 | iex
+```
+
+Then run `viper`. The first run asks you to **Sign up** or **Sign in** (your browser opens a short form),
+or to continue free for 3 queries. After that you pick a provider with the arrow keys and paste your own API key.
+
+```bash
+viper            # first run: sign up / sign in, pick a provider, paste your key
+viper login      # sign up or sign in again
+viper logout     # sign out and remove saved keys
+```
+
+Skip the prompts by exporting a key instead: `export OPENROUTER_API_KEY="sk-or-..."`.
+Maintainers: backend and auth page setup is in [supabase/README.md](supabase/README.md).
+
+**Manual install**
+```bash
+pip install "viper-agent[all]"
 playwright install chromium
-
-# Set your API key (skip if using Ollama)
-$env:OPENROUTER_API_KEY = "your-key"
-
-python agent.py
+viper
 ```
 
 ---

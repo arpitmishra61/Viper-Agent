@@ -9,7 +9,7 @@ _CD_RE = re.compile(r'^cd\s*(.*)', re.IGNORECASE)
 
 
 def run_shell(command: str, cwd: str = None, timeout: int = _DEFAULT_TIMEOUT,
-              sandbox: bool = False) -> str:
+              sandbox: bool = True) -> str:
     # Delegate to E2B sandbox when requested
     if sandbox:
         from tools.sandbox import run_shell_in_sandbox
@@ -82,13 +82,14 @@ DEFINITIONS = [
                     "sandbox": {
                         "type": "boolean",
                         "description": (
-                            "Run in an isolated E2B cloud microVM instead of the user's machine. "
-                            "Use when: cloning or modifying git repos, running code from the internet, "
-                            "long build/test/install operations, anything risky or potentially destructive. "
-                            "The sandbox persists for the session — files written in one call are visible "
-                            "to subsequent sandboxed calls."
+                            "Run in an isolated E2B cloud microVM. DEFAULT IS TRUE — always use the sandbox. "
+                            "Only pass sandbox=false for read-only local state checks that must inspect the "
+                            "user's actual machine (e.g. checking a locally-installed tool version). "
+                            "NEVER pass sandbox=false for git, GitHub, cloning, builds, installs, or any "
+                            "command that modifies files or directories. The sandbox persists for the session "
+                            "— files created in one sandboxed call are visible to all subsequent sandboxed calls."
                         ),
-                        "default": False,
+                        "default": True,
                     },
                 },
                 "required": ["command"],

@@ -24,6 +24,9 @@ from rich.rule import Rule
 from rich.spinner import Spinner
 from rich.text import Text
 
+import auth
+import onboarding
+from auth import get_or_create_key as _get_or_create_key
 from providers import PROVIDERS, get_client
 from system_prompt import SYSTEM_PROMPT
 from tools import TOOL_DEFINITIONS, execute_tool
@@ -80,7 +83,7 @@ _BANNER = """\
 # ── limits ────────────────────────────────────────────────────────────────────
 _MAX_TOOL_OUTPUT_CHARS = 8_000   # ~2k tokens per tool result
 _MAX_CONTEXT_CHARS     = 100_000  # ~25k tokens; prune when exceeded
-_MAX_ITERATIONS        = 20       # tool-call rounds per user turn
+_MAX_ITERATIONS        = 50       # tool-call rounds per user turn
 
 # ── dangerous shell patterns ──────────────────────────────────────────────────
 _DANGEROUS_RE = re.compile(
@@ -120,22 +123,6 @@ _MAX_SESSION_TOOL_CALLS: int = 200
 
 # ── session storage ───────────────────────────────────────────────────────────
 _SESSIONS_DIR = Path.home() / ".viper" / "sessions"
-_KEY_PATH     = Path.home() / ".viper" / ".key"
-
-
-def _get_or_create_key() -> bytes:
-    """Return the Fernet encryption key for session files, generating it on first use."""
-    if _KEY_PATH.exists():
-        return _KEY_PATH.read_bytes()
-    key = _Fernet.generate_key()
-    _KEY_PATH.parent.mkdir(parents=True, exist_ok=True)
-    _KEY_PATH.write_bytes(key)
-    try:
-        import stat as _stat
-        _KEY_PATH.chmod(_stat.S_IRUSR | _stat.S_IWUSR)  # owner-only on Unix
-    except Exception:
-        pass
-    return key
 
 
 # ── token helpers ─────────────────────────────────────────────────────────────
@@ -535,7 +522,7 @@ def _run_multi_agent(request: str, state: dict) -> None:
     """Invoke sublayer orchestration: plan → parallel workers → aggregate."""
     from orchestrator import OrchestratorAgent  # lazy import keeps startup fast
 
-    client = get_client(state["provider"])[0]
+    client = state["client"]
     orch   = OrchestratorAgent(client, state["model"], max_retries=2, max_workers=4)
 
     console.print(f"\n  🧩  [bold {_VIOLET}]orchestrating[/bold {_VIOLET}]  [dim]{request[:60]}[/dim]\n")
@@ -585,6 +572,7 @@ _HELP_TEXT = (
     f"  [bold {_GREEN}]/think[/bold {_GREEN}]          toggle visible thinking on/off\n"
     f"  [bold {_GREEN}]/multi[/bold {_GREEN}] [dim]<request>[/dim] run multi-agent orchestration\n"
     f"  [bold {_GREEN}]/pii[/bold {_GREEN}]   [dim][allow|block|reset] <Type>[/dim] manage PII warning suppression\n"
+    f"  [bold {_GREEN}]/e2b[/bold {_GREEN}]   [dim]<key>[/dim]      use your own E2B key for the sandbox\n"
     f"  [bold {_GREEN}]/help[/bold {_GREEN}]           show this message"
 )
 
@@ -696,6 +684,13 @@ def _handle_slash(raw: str, state: dict) -> None:
         else:
             console.print(f"  [dim]unknown subcommand: {subcmd} — try /pii allow Email[/dim]\n")
 
+    elif name == "/e2b":
+        if not arg:
+            console.print(f"  [dim]usage: /e2b <your E2B API key>  (get one at https://e2b.dev)[/dim]\n")
+        else:
+            auth.save_key("E2B_API_KEY", arg)
+            console.print(f"  [dim]E2B key saved; sandbox calls now use it[/dim]\n")
+
     elif name == "/help":
         console.print(f"\n{_HELP_TEXT}\n")
 
@@ -704,7 +699,25 @@ def _handle_slash(raw: str, state: dict) -> None:
 
 
 # ── main chat loop ─────────────────────────────────────────────────────────────
-def chat(client, model: str, provider: str, resume: bool = False, cwd: str = None):
+def _admit_query() -> bool:
+    """Block the query when the free trial is used up, offering sign-in."""
+    ok, why = auth.query_gate()
+    if ok:
+        return True
+    console.print(f"\n  [bold {_AMBER}]{why}[/bold {_AMBER}]")
+    if onboarding.offer_login():
+        return True
+    console.print(f"  [dim]nothing was sent. run viper login any time.[/dim]\n")
+    return False
+
+
+def _count_query() -> None:
+    if auth.counts_against_trial():
+        left = auth.consume_trial()
+        console.print(f"  [dim]free queries left: {left}[/dim]")
+
+
+def chat(client, model: str, provider: str, resume: bool = False, cwd: str = None, identity: str = ""):
     if cwd:
         set_cwd(os.path.abspath(cwd))
 
@@ -723,13 +736,17 @@ def chat(client, model: str, provider: str, resume: bool = False, cwd: str = Non
         else:
             console.print(f"  [dim]no saved session found[/dim]")
 
-    state = {"messages": messages, "model": model, "provider": provider}
+    state = {"messages": messages, "model": model, "provider": provider, "client": client}
 
     console.print()
     console.print(_BANNER)
     console.print()
+    who = "" if not identity else (
+        f"free trial · {auth.trial_remaining()} queries left  ·  " if identity == "guest"
+        else f"{identity}  ·  "
+    )
     console.print(
-        f"  [dim]{provider}  ·  {model}  ·  "
+        f"  [dim]{who}{provider}  ·  {model}  ·  "
         f"cwd: {get_cwd()}  ·  /help  ·  ctrl+c to quit[/dim]"
     )
     console.print(Rule(style=f"dim {_GREEN}"))
@@ -753,7 +770,14 @@ def chat(client, model: str, provider: str, resume: bool = False, cwd: str = Non
             break
 
         if user_input.startswith("/"):
+            if user_input.lower().startswith("/multi "):
+                if not _admit_query():
+                    continue
+                _count_query()
             _handle_slash(user_input, state)
+            continue
+
+        if not _admit_query():
             continue
 
         # ── PII guard on user input ────────────────────────────────────────────
@@ -778,6 +802,7 @@ def chat(client, model: str, provider: str, resume: bool = False, cwd: str = Non
                 console.print()
                 continue
 
+        _count_query()
         state["messages"].append({"role": "user", "content": user_input})
         console.print()
 
@@ -851,7 +876,9 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 examples:
-  python agent.py
+  viper                 first run: sign up or sign in in your browser (or try 3 free queries)
+  viper login           same as --login
+  viper logout          sign out and remove saved keys
   python agent.py --provider openrouter --model mistralai/mistral-7b-instruct:free
   python agent.py --provider anthropic --model anthropic/claude-3.5-haiku
   python agent.py --provider ollama --model llama3.2
@@ -860,7 +887,12 @@ examples:
   python agent.py --list-providers
         """,
     )
-    parser.add_argument("--provider", "-p", default="openrouter", choices=list(PROVIDERS))
+    parser.add_argument("--provider", "-p", default=None, choices=list(PROVIDERS),
+                        help="Skip the provider menu (default: pick interactively)")
+    parser.add_argument("command", nargs="?", choices=["login", "logout"],
+                        help="'viper login' and 'viper logout' work like --login and --logout")
+    parser.add_argument("--login", action="store_true", help="Sign up or sign in through your browser")
+    parser.add_argument("--logout", action="store_true", help="Sign out and remove saved keys")
     parser.add_argument("--model", "-m", default=None)
     parser.add_argument("--api-key", default=None)
     parser.add_argument("--resume", "-r", action="store_true", help="Resume last saved session")
@@ -872,16 +904,31 @@ examples:
         _list_providers()
         return
 
+    if args.login or args.command == "login":
+        onboarding.cmd_login()
+        return
+    if args.logout or args.command == "logout":
+        onboarding.cmd_logout()
+        return
+
     try:
-        client, config = get_client(args.provider, args.api_key)
+        start = onboarding.startup(args.provider, args.model, args.api_key)
+    except KeyboardInterrupt:
+        console.print(f"\n  [dim]goodbye[/dim]\n")
+        return
+    if start is None:
+        return
+
+    try:
+        client, config = get_client(start.provider, start.api_key)
     except ValueError as e:
         console.print(f"\n  [bold {_RED}]error:[/bold {_RED}] {e}\n")
         sys.exit(1)
 
-    model = args.model or config["default_model"]
+    model = start.model or config["default_model"]
 
     try:
-        chat(client, model, args.provider, resume=args.resume, cwd=args.cwd)
+        chat(client, model, start.provider, resume=args.resume, cwd=args.cwd, identity=start.identity)
     except KeyboardInterrupt:
         console.print(f"\n  [dim]goodbye[/dim]\n")
 

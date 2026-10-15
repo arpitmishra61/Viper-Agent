@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "viper-agent"
+version = "0.1.0"
+description = "Viper — minimal multi-provider terminal AI agent"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+keywords = ["ai", "agent", "llm", "terminal", "cli"]
+dependencies = [
+    "openai>=1.50.0",
+    "rich>=13.7.0",
+    "ddgs>=0.1.0",
+    "playwright>=1.40.0",
+    "python-dotenv>=1.0.0",
+    "questionary>=2.0.1",
+    "httpx>=0.27",
+]
+
+[project.optional-dependencies]
+# pip install viper-agent[sandbox]   → E2B cloud microVM support
+sandbox = ["e2b>=1.0.0"]
+# pip install viper-agent[crypto]    → encrypted session files
+crypto = ["cryptography>=41.0.0"]
+# pip install viper-agent[all]       → everything
+all = ["e2b>=1.0.0", "cryptography>=41.0.0"]
+
+[project.scripts]
+viper = "agent:main"
+
+[tool.setuptools]
+py-modules = ["agent", "providers", "system_prompt", "orchestrator", "auth", "onboarding", "browser_auth"]
+packages = ["tools"]

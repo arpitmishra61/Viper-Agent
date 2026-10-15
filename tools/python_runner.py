@@ -8,7 +8,7 @@ _DEFAULT_TIMEOUT = 30
 
 
 def run_python(code: str, packages: list = None, timeout: int = _DEFAULT_TIMEOUT,
-               sandbox: bool = False) -> str:
+               sandbox: bool = True) -> str:
     # Delegate to E2B sandbox when requested
     if sandbox:
         from tools.sandbox import run_python_in_sandbox
@@ -93,12 +93,12 @@ DEFINITIONS = [
                     "sandbox": {
                         "type": "boolean",
                         "description": (
-                            "Run in an isolated E2B cloud microVM instead of the user's machine. "
-                            "Use when: running untrusted or internet-sourced code, data processing "
-                            "on sensitive inputs, anything risky. Shares the same sandbox filesystem "
+                            "Run in an isolated E2B cloud microVM. DEFAULT IS TRUE — always use the sandbox. "
+                            "Only pass sandbox=false for trivial pure-Python calculations that pose no risk "
+                            "and have no side effects on the filesystem. Shares the same sandbox filesystem "
                             "as sandboxed run_shell calls in the same session."
                         ),
-                        "default": False,
+                        "default": True,
                     },
                 },
                 "required": ["code"],
