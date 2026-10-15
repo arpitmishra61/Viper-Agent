@@ -58,7 +58,8 @@ $env:VIPER_AUTH_URL = "https://YOUR-HOST/auth"
 python agent.py login
 ```
 
-A `.env` next to `agent.py` skips login entirely (source checkout). Rename it to test the real flow.
+A `.env` next to `agent.py` that contains an API key skips login entirely (source checkout). Remove the key
+from it (or the file) to test the real flow.
 
 ## 5. Deploy the sandbox function
 

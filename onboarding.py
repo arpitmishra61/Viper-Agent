@@ -205,7 +205,9 @@ def _provider_step(provider_arg: str | None, model_arg: str | None, key_arg: str
 
 def startup(provider_arg: str | None, model_arg: str | None, key_arg: str | None) -> Start | None:
     if auth.is_dev_mode():
-        return Start(provider_arg or "openrouter", model_arg, key_arg, "")
+        env = PROVIDERS[provider_arg or "openrouter"].get("api_key_env")
+        if key_arg or not env or os.environ.get(env):
+            return Start(provider_arg or "openrouter", model_arg, key_arg, "")
     identity = _identity_step()
     if identity is None:
         return None

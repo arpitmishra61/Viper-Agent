@@ -103,9 +103,14 @@ def backend_configured() -> bool:
     return bool(SUPABASE_URL and SUPABASE_ANON_KEY and AUTH_PAGE_URL)
 
 
+_PROVIDER_KEY_VARS = ("OPENROUTER_API_KEY", "HF_TOKEN")
+
+
 def is_dev_mode() -> bool:
-    """A .env next to agent.py means a source checkout: no login, no limits."""
-    return (Path(__file__).parent / ".env").exists()
+    """A .env next to agent.py that actually supplies a key: no login, no limits."""
+    return (Path(__file__).parent / ".env").exists() and any(
+        os.environ.get(v) for v in _PROVIDER_KEY_VARS
+    )
 
 
 def is_logged_in() -> bool:
