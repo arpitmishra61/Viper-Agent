@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Viper installer — curl -fsSL https://raw.githubusercontent.com/arpitmishra61/viper/main/install.sh | bash
+# Viper installer — curl -fsSL https://raw.githubusercontent.com/arpitmishra61/Viper-Agent/master/install.sh | bash
 set -euo pipefail
 
 GREEN='\033[0;32m'
@@ -59,7 +59,7 @@ if $PYTHON -m pip install "viper-agent[all]" -q 2>/dev/null; then
 else
     _warn "not on PyPI yet — installing from GitHub source"
     $PYTHON -m pip install \
-        "git+https://github.com/arpitmishra61/viper.git[all]" -q \
+        "viper-agent[all] @ git+https://github.com/arpitmishra61/Viper-Agent.git" -q \
         || _die "install failed. Check your internet connection and try again."
     _ok "installed from GitHub"
 fi

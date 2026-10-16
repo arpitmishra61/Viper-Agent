@@ -1,5 +1,5 @@
 # Viper installer for Windows PowerShell
-# iwr -useb https://raw.githubusercontent.com/arpitmishra61/viper/main/install.ps1 | iex
+# iwr -useb https://raw.githubusercontent.com/arpitmishra61/Viper-Agent/master/install.ps1 | iex
 $ErrorActionPreference = "Stop"
 
 function _ok   { Write-Host "  " -NoNewline; Write-Host "v" -ForegroundColor Green -NoNewline; Write-Host "  $args" }
@@ -56,7 +56,7 @@ try {
 if (-not $installed) {
     _warn "not on PyPI yet — installing from GitHub source"
     try {
-        & $PYTHON -m pip install "git+https://github.com/arpitmishra61/viper.git[all]" -q
+        & $PYTHON -m pip install "viper-agent[all] @ git+https://github.com/arpitmishra61/Viper-Agent.git" -q
         _ok "installed from GitHub"
     } catch {
         _die "install failed. Check your internet connection and try again."

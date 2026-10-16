@@ -23,34 +23,23 @@ class Start:
     identity: str   # "" (dev), "guest", or the signed-in email
 
 
-# ── sign up / sign in (browser) ───────────────────────────────────────────────
+# ── sign in with Google (browser) ─────────────────────────────────────────────
 def _notify(url: str, opened: bool) -> None:
     if opened:
-        console.print("  [dim]opening your browser to finish signing in...[/dim]")
+        console.print("  [dim]opening your browser to sign in with Google...[/dim]")
     else:
         console.print("  [yellow]could not open a browser automatically[/yellow]")
     console.print(f"  [dim]if nothing opens, visit:[/dim] {url}")
     console.print("  [dim]waiting for you to finish (5 minutes, ctrl+c to cancel)...[/dim]")
 
 
-def login_flow(mode: str | None = None) -> str | None:
-    """Sign up or sign in through the browser. Returns the email, or None if cancelled."""
+def login_flow() -> str | None:
+    """Sign in with Google through the browser. Returns the email, or None if cancelled."""
     if not auth.backend_configured():
         console.print("  [red]login is not configured for this build[/red]\n")
         return None
-    if mode is None:
-        mode = questionary.select(
-            "Welcome to Viper.",
-            choices=[
-                questionary.Choice("Sign up", value="signup"),
-                questionary.Choice("Sign in", value="signin"),
-                questionary.Choice("Cancel", value="cancel"),
-            ],
-        ).ask()
-        if mode in (None, "cancel"):
-            return None
     try:
-        email = browser_auth.browser_login(mode, _notify)
+        email = browser_auth.browser_login(_notify)
     except auth.AuthError as e:
         console.print(f"\n  [red]{e}[/red]\n")
         return None
@@ -102,10 +91,7 @@ def _identity_step() -> str | None:
         if not sys.stdin.isatty():
             return "guest"
         left = auth.trial_remaining()
-        choices = [
-            questionary.Choice("Sign up", value="signup"),
-            questionary.Choice("Sign in", value="signin"),
-        ]
+        choices = [questionary.Choice("Sign in with Google", value="signin")]
         if left > 0:
             choices.append(questionary.Choice(
                 f"Continue free ({left} of {auth.FREE_TRIAL_QUERIES} queries left)", value="free"))
@@ -115,7 +101,7 @@ def _identity_step() -> str | None:
             return None
         if pick == "free":
             return "guest"
-        email = login_flow(pick)
+        email = login_flow()
         if email:
             return email
 

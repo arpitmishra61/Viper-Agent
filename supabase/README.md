@@ -1,18 +1,30 @@
 # Viper backend (Supabase)
 
-Accounts (email and password, signed in through your browser) and the free E2B sandbox quota.
-Everything here fits the Supabase free tier.
+Sign in with Google (through your browser) and the free E2B sandbox quota.
+Everything here fits the free tiers. No email server is needed, because Google sends no email through Supabase.
 
 ## 1. Database and secrets
 
 1. SQL editor: run `migrations/0001_init.sql`.
 2. Table Editor > `app_secrets` > Insert row: `name = E2B_API_KEY`, `value = <your E2B key>`.
 
-## 2. Auth settings (Supabase dashboard)
+## 2. Turn on Google sign-in
 
-**Authentication > Sign In / Providers > Email**
-- Email provider on, **Confirm email** on. Users cannot sign in until they confirm.
-- Minimum password length: 8 (the page also enforces this).
+### 2a. In Google Cloud (console.cloud.google.com)
+1. Create or pick a project.
+2. **APIs & Services > OAuth consent screen**: choose External, fill in the app name (Viper) and your support email,
+   then **Publish app** so any Google account can sign in. Add no extra scopes; the default `email` and `profile` are enough.
+3. **APIs & Services > Credentials > Create credentials > OAuth client ID**, type **Web application**.
+4. **Authorized redirect URIs**: add `https://YOUR-REF.supabase.co/auth/v1/callback`
+   (your Supabase Project URL followed by `/auth/v1/callback`).
+5. Create it and copy the **Client ID** and **Client secret**.
+
+### 2b. In Supabase
+1. **Authentication > Sign In / Providers > Google**: switch it on, paste the Client ID and Client secret, save.
+2. **Authentication > Sign In / Providers > Email**: switch it **off**. Otherwise anyone can still create
+   an email and password account through the API. The CLI also rejects any session that did not come from Google.
+
+## 3. Redirect URLs
 
 **Authentication > URL Configuration**
 
@@ -22,46 +34,33 @@ Everything here fits the Supabase free tier.
 | Redirect URLs | `https://viper-auth.vercel.app/**` |
 | Redirect URLs (local testing only) | `http://localhost:8000/**` |
 
-The trailing `**` is required. The page adds `?mode=...&state=...&port=...` to the confirmation and
-password-reset links, and Supabase rejects any redirect that does not match the list.
+The page sends users back to itself after Google, with `?state=...&port=...` added, and Supabase rejects
+any redirect that is not on this list.
 
-**Authentication > Email Templates**: the default Confirm signup and Reset password templates work as they are.
+## 4. Host the auth page
 
-**Authentication > SMTP Settings** (required before real users sign up): Supabase's built-in mailer only
-sends to your own team members and is heavily rate limited. Add a custom SMTP server. Resend and Brevo have free tiers.
-
-## 3. Host the auth page
-
-The page is `viper-auth/index.html`, deployed to Vercel at `https://viper-auth.vercel.app/`. It cannot run
-as a Claude artifact, so it needs a real static host.
+The page is `viper-auth/index.html`, deployed to Vercel at `https://viper-auth.vercel.app/`. It needs a real
+static host, because it calls Supabase from the browser.
 
 1. Copy `viper-auth/config.example.js` to `viper-auth/config.js`.
 2. Fill in `supabaseUrl` and `supabaseAnonKey` (Project Settings > API). The anon or publishable key is public
    by design. Never use the `service_role` or `sb_secret_` key.
 
-## 4. Point the CLI at it
+## 5. Point the CLI at it
 
 | Variable | Value |
 | --- | --- |
 | `VIPER_SUPABASE_URL` | `https://YOUR-REF.supabase.co` |
-| `VIPER_SUPABASE_ANON_KEY` | the anon public key |
+| `VIPER_SUPABASE_ANON_KEY` | the anon or publishable key |
 | `VIPER_AUTH_URL` | `https://viper-auth.vercel.app/` |
 
 `auth.py` already has these three values as defaults, so published installs need no environment variables.
 The variables only override them.
-Quick test in PowerShell:
-
-```
-$env:VIPER_SUPABASE_URL = "https://YOUR-REF.supabase.co"
-$env:VIPER_SUPABASE_ANON_KEY = "your-anon-key"
-$env:VIPER_AUTH_URL = "https://YOUR-HOST/auth"
-python agent.py login
-```
 
 A `.env` next to `agent.py` that contains an API key skips login entirely (source checkout). Remove the key
 from it (or the file) to test the real flow.
 
-## 5. Deploy the sandbox function
+## 6. Deploy the sandbox function
 
 ```
 npx supabase login
@@ -71,16 +70,17 @@ npx supabase functions deploy sandbox-grant
 
 ## How sign-in works
 
-1. `viper` shows **Sign up / Sign in**. The CLI starts a one-shot server on `127.0.0.1` (random port) and opens
-   `auth.html?mode=signup|signin&state=...&port=...`.
-2. The user signs up or in on the page. Passwords go to Supabase, never to Viper.
-3. The page submits the session to `http://127.0.0.1:PORT/callback`. The CLI checks the `state`, the `Origin`
-   (when the browser sends one), and asks Supabase to confirm the token and that the email is verified.
+1. `viper` shows **Sign in with Google / Continue free / Quit**. The CLI starts a one-shot server on
+   `127.0.0.1` (random port) and opens `https://viper-auth.vercel.app/?state=...&port=...`.
+2. The user clicks **Continue with Google** and picks an account. Supabase handles the Google exchange.
+3. Google sends the user back to the page. The page submits the session to
+   `http://127.0.0.1:PORT/callback`. The CLI checks the `state`, the `Origin` (when the browser sends one),
+   and asks Supabase to confirm the token, that it came from Google, and that the email is verified.
    Then it stores the session and shuts the server down.
-4. The browser shows "You're signed in". The CLI prints "Authenticated as ...". Tokens refresh automatically.
+4. The browser shows "You're signed in". The CLI prints "Authenticated as ..." and continues to the provider menu.
+   Tokens refresh automatically.
 
 If the CLI is not waiting any more (it times out after 5 minutes), run `viper login` again.
-Confirmation and reset emails carry the `state` so clicking them can finish the same login.
 There is no PKCE step: PKCE protects an authorization code that is exchanged later, and this handoff
 delivers the session directly. The state blocks forged callbacks and the token check blocks anything
 Supabase did not issue.

@@ -200,8 +200,12 @@ def verify_access_token(access_token: str) -> str:
     if r.status_code >= 400:
         raise AuthError("That sign-in was not accepted. Please try again.")
     user = r.json()
+    meta = user.get("app_metadata") or {}
+    providers = meta.get("providers") or [meta.get("provider")]
+    if "google" not in providers:
+        raise AuthError("Viper only supports signing in with Google.")
     if not user.get("email_confirmed_at"):
-        raise AuthError("Your email is not verified yet. Confirm it from your inbox, then sign in.")
+        raise AuthError("Google did not confirm this email address. Try another Google account.")
     return str(user["email"]).lower()
 
 

@@ -876,7 +876,7 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 examples:
-  viper                 first run: sign up or sign in in your browser (or try 3 free queries)
+  viper                 first run: sign in with Google in your browser (or try 3 free queries)
   viper login           same as --login
   viper logout          sign out and remove saved keys
   python agent.py --provider openrouter --model mistralai/mistral-7b-instruct:free
@@ -891,7 +891,7 @@ examples:
                         help="Skip the provider menu (default: pick interactively)")
     parser.add_argument("command", nargs="?", choices=["login", "logout"],
                         help="'viper login' and 'viper logout' work like --login and --logout")
-    parser.add_argument("--login", action="store_true", help="Sign up or sign in through your browser")
+    parser.add_argument("--login", action="store_true", help="Sign in with Google through your browser")
     parser.add_argument("--logout", action="store_true", help="Sign out and remove saved keys")
     parser.add_argument("--model", "-m", default=None)
     parser.add_argument("--api-key", default=None)

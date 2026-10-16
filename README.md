@@ -29,20 +29,21 @@ Viper is a ReAct agent — it reasons, calls tools, observes results, and loops 
 
 **Mac / Linux**
 ```bash
-curl -fsSL https://raw.githubusercontent.com/arpitmishra61/viper/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/arpitmishra61/Viper-Agent/master/install.sh | bash
 ```
 
 **Windows (PowerShell)**
 ```powershell
-iwr -useb https://raw.githubusercontent.com/arpitmishra61/viper/main/install.ps1 | iex
+iwr -useb https://raw.githubusercontent.com/arpitmishra61/Viper-Agent/master/install.ps1 | iex
 ```
 
-Then run `viper`. The first run asks you to **Sign up** or **Sign in** (your browser opens a short form),
-or to continue free for 3 queries. After that you pick a provider with the arrow keys and paste your own API key.
+Then run `viper`. The first run asks you to **Sign in with Google** (your browser opens, you pick an account,
+and you come back to the terminal), or to continue free for 3 queries. After that you pick a provider with the
+arrow keys and paste your own API key.
 
 ```bash
-viper            # first run: sign up / sign in, pick a provider, paste your key
-viper login      # sign up or sign in again
+viper            # first run: sign in with Google, pick a provider, paste your key
+viper login      # sign in again
 viper logout     # sign out and remove saved keys
 ```
 

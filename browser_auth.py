@@ -94,10 +94,8 @@ def _handler(state: str, expected_origin: str, result: _Result):
     return Handler
 
 
-def browser_login(mode: str, notify: Callable[[str, bool], None]) -> str:
-    """Run the browser sign-in. mode is 'signup' or 'signin'. Returns the verified email."""
-    if mode not in ("signup", "signin"):
-        raise ValueError(mode)
+def browser_login(notify: Callable[[str, bool], None]) -> str:
+    """Run the browser sign-in with Google. Returns the verified email."""
     state = secrets.token_urlsafe(32)
     result = _Result()
     parsed = urlparse(auth.AUTH_PAGE_URL)
@@ -111,9 +109,7 @@ def browser_login(mode: str, notify: Callable[[str, bool], None]) -> str:
     server.timeout = 0.5
 
     sep = "&" if "?" in auth.AUTH_PAGE_URL else "?"
-    url = auth.AUTH_PAGE_URL + sep + urlencode(
-        {"mode": mode, "state": state, "port": server.server_address[1]}
-    )
+    url = auth.AUTH_PAGE_URL + sep + urlencode({"state": state, "port": server.server_address[1]})
     try:
         opened = webbrowser.open(url)
     except Exception:
