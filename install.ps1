@@ -23,7 +23,7 @@ Write-Host ""
 _info "checking Python..."
 
 $PYTHON = $null
-foreach ($cmd in @("python3.13", "python3.12", "python3.11", "python3", "python")) {
+foreach ($cmd in @("python3.13", "python3.12", "python3.11", "python3", "python", "py")) {
     try {
         $ver = & $cmd -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2>$null
         if ($ver) {
