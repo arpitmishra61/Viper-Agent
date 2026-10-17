@@ -22,15 +22,15 @@ PROVIDERS = {
         "description": "OpenRouter — free + paid models from many providers",
     },
     "huggingface": {
-        "base_url": "https://api-inference.huggingface.co/v1",
+        "base_url": "https://router.huggingface.co/hf-inference/v1",
         "api_key_env": "HF_TOKEN",
-        "default_model": "meta-llama/Llama-3.1-8B-Instruct",
-        "description": "Hugging Face Inference API",
+        "default_model": "Qwen/Qwen2.5-7B-Instruct",
+        "description": "Hugging Face Inference API (via router)",
     },
     "anthropic": {
         "base_url": "https://openrouter.ai/api/v1",
         "api_key_env": "OPENROUTER_API_KEY",
-        "default_model": "anthropic/claude-3.5-haiku",
+        "default_model": "anthropic/claude-sonnet-5-5",
         "description": "Claude via OpenRouter (requires OPENROUTER_API_KEY)",
     },
 }

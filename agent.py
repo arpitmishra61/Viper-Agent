@@ -900,6 +900,8 @@ examples:
     parser.add_argument("--list-providers", "-l", action="store_true")
     args = parser.parse_args()
 
+    console.print("\n [bold green]Welcome to Viper[/bold green] [dim]— minimal multi-provider terminal AI agent[/dim]\n")
+
     if args.list_providers:
         _list_providers()
         return

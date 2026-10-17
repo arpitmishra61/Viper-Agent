@@ -82,12 +82,14 @@ DEFINITIONS = [
                     "sandbox": {
                         "type": "boolean",
                         "description": (
-                            "Run in an isolated E2B cloud microVM. DEFAULT IS TRUE — always use the sandbox. "
-                            "Only pass sandbox=false for read-only local state checks that must inspect the "
-                            "user's actual machine (e.g. checking a locally-installed tool version). "
-                            "NEVER pass sandbox=false for git, GitHub, cloning, builds, installs, or any "
-                            "command that modifies files or directories. The sandbox persists for the session "
-                            "— files created in one sandboxed call are visible to all subsequent sandboxed calls."
+                            "Where to run: true = isolated E2B cloud VM, false = user's local machine. "
+                            "Ask yourself: does the user want this result on their local machine? "
+                            "sandbox=FALSE (host): creating project files/dirs, running a local script, "
+                            "git status/log/diff, ls, pwd, which, version checks — anything the user wants "
+                            "to persist locally. Prefer write_file/edit_file tools over run_shell for file creation. "
+                            "sandbox=TRUE (cloud VM): pip install, npm install, cargo build, uv add, conda install "
+                            "(ANY package install), git clone <url>, running downloaded/untrusted scripts. "
+                            "Default is true — override to false only when the user wants the output on their machine."
                         ),
                         "default": True,
                     },

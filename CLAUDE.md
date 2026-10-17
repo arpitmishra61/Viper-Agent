@@ -352,15 +352,34 @@ parameter lets the model opt in for exactly the tasks that warrant it.
 
 ### When the model uses `sandbox=True`
 
-| Task | sandbox=True? | Why |
-|------|--------------|-----|
-| Clone a GitHub repo | ✅ | Repo code runs in isolation |
-| Run `npm install` / build | ✅ | Long operation, may pollute env |
-| Run a script from the internet | ✅ | Untrusted code |
-| Implement + test a fix for a GitHub issue | ✅ | Full dev workflow in isolation |
-| `git status` / `ls` | ❌ | Safe, local state check |
-| `pip show requests` | ❌ | Read-only, no risk |
-| Writing a local file | ❌ | `write_file` handles this locally |
+**Hard rule: package installs always go in the sandbox.**  
+`pip install`, `npm install`, `uv add`, `conda install`, or any other command that modifies the package environment MUST use `sandbox=True`. There is no exception. A task requiring a local file is not a justification for installing on the host — upload the file to the sandbox first (via `sbx.files.write()`), then run the install and work there.
+
+**Hard rule: never silently downgrade to `sandbox=False`.**  
+If `sandbox=True` is the right choice (see table below) but the task seems difficult in the sandbox (e.g., a local file is needed), the correct action is to either (a) upload the file to the sandbox and proceed, or (b) tell the user the constraint and ask how to proceed. Silently running with `sandbox=False` is always wrong and must never happen.
+
+**The decision rule:** Ask "does the user want this output on their local machine?"
+- YES → host (`sandbox=false`, or better: use `write_file`/`edit_file` tools directly)
+- NO / it installs things / it runs untrusted code → sandbox (`sandbox=true`)
+
+| Task | sandbox? | Why |
+|------|----------|-----|
+| `pip install`, `npm install`, `uv add`, `conda install` | ✅ sandbox | Modifies host environment permanently |
+| `git clone <url>` (untrusted repo) | ✅ sandbox | Untrusted code runs in isolation |
+| Run a script from the internet | ✅ sandbox | Untrusted code |
+| Implement + test a fix for a GitHub issue | ✅ sandbox | Full dev workflow in isolation |
+| Run code with third-party packages | ✅ sandbox | Side effects stay in cloud VM |
+| Create files/dirs in the user's project | ❌ host | User wants these on their machine — use `write_file`/`edit_file` tools or `run_shell(sandbox=false)` |
+| `mkdir`, scaffold a project structure | ❌ host | Same — user wants it locally |
+| Run a script the user wrote, locally | ❌ host | User wrote it, they want to run it on their machine |
+| `git status` / `ls` / `pwd` / `which` | ❌ host | Read-only local state check |
+| `pip show requests` / `pip list` | ❌ host | Read-only, no risk |
+
+**If a task needs a local file inside the sandbox:**
+1. Read the file locally with `read_file` or `run_shell` (no sandbox).
+2. Upload its content into the sandbox via `sbx.files.write()` inside `sandbox.py`.
+3. Proceed with `sandbox=True` for all install/execution steps.
+Do NOT install packages on the host as a workaround for file-access limitations.
 
 ### Shared sandbox filesystem
 Both `run_shell(sandbox=True)` and `run_python(sandbox=True)` use the **same sandbox instance**.
