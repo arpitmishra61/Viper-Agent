@@ -25,8 +25,12 @@ dependencies = [
 sandbox = ["e2b>=1.0.0"]
 # pip install viper-agent[crypto]    → encrypted session files
 crypto = ["cryptography>=41.0.0"]
+# pip install viper-agent[docs]   -> attach PDF / Word / Excel files
+docs = ["pypdf>=4.0.0", "python-docx>=1.0.0", "openpyxl>=3.1.0"]
+# pip install viper-agent[evals]  -> dev only: read benchmark datasets (GAIA metadata is Parquet)
+evals = ["pyarrow>=14.0.0"]
 # pip install viper-agent[all]       → everything
-all = ["e2b>=1.0.0", "cryptography>=41.0.0"]
+all = ["e2b>=1.0.0", "cryptography>=41.0.0", "pypdf>=4.0.0", "python-docx>=1.0.0", "openpyxl>=3.1.0"]
 
 [project.scripts]
 viper = "agent:main"

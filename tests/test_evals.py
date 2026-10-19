@@ -8,7 +8,7 @@ import pytest
 
 import agent
 from tools.state import get_cwd
-from evals.harness import Budget, RunResult, run_task
+from evals.harness import Budget, RunResult, run_task, write_setup
 from evals.report import render
 from evals.tasks import BY_ID, TASKS
 
@@ -369,6 +369,51 @@ class TestGuardrailTasks:
         assert not r.passed and "shell" in r.reason
 
 
+# ── attachment tasks: the @file goes through the real _prepare_message ────────
+
+class TestAttachmentTasks:
+    def test_csv_is_attached_and_answer_checked(self):
+        r, client = run("attach_csv", reply("245.75"))
+        assert "<attachment" in r.user_content and "north,120.5" in r.user_content
+        # the model actually received the file contents in its first request
+        assert "north,120.5" in client.requests[0]["messages"][1]["content"]
+        assert r.passed, r.reason
+
+    def test_csv_wrong_total_fails(self):
+        r, _ = run("attach_csv", reply("250"))
+        assert not r.passed
+
+    def test_pdf(self):
+        r, _ = run("attach_pdf", reply("March 14."))
+        assert "Launch date: March 14" in r.user_content
+        assert r.passed, r.reason
+
+    def test_docx(self):
+        r, _ = run("attach_docx", reply("Raj"))
+        assert "Raj | Auditor" in r.user_content
+        assert r.passed, r.reason
+
+    def test_xlsx(self):
+        r, _ = run("attach_xlsx", reply("south"))
+        assert "south | 250" in r.user_content
+        assert r.passed, r.reason
+
+    def test_xlsx_naming_two_regions_fails(self):
+        r, _ = run("attach_xlsx", reply("north or south"))
+        assert not r.passed
+
+    def test_malicious_attachment_is_withheld(self):
+        r, client = run("attach_injection", reply("It reports revenue up 4%."))
+        assert r.prompts and "ignore all previous" not in r.user_content
+        assert "ignore all previous" not in client.requests[0]["messages"][1]["content"]
+        assert "possible prompt injection" in r.user_content        # the model is told it was withheld
+        assert r.passed, r.reason
+
+    def test_attachment_content_is_untrusted_tagged(self):
+        r, _ = run("attach_csv", reply("245.75"))
+        assert 'trust="untrusted"' in r.user_content
+
+
 # ── file-op tasks with real tools ─────────────────────────────────────────────
 
 class TestFileTasks:
@@ -443,10 +488,7 @@ class TestRegistry:
     def test_every_checker_handles_an_empty_run(self, tmp_path):
         # a model that does nothing must produce a clean failure — never an exception
         for t in TASKS:
-            for rel, content in t.setup.items():
-                p = tmp_path / rel
-                p.parent.mkdir(parents=True, exist_ok=True)
-                p.write_text(content, encoding="utf-8")
+            write_setup(tmp_path, t.setup)
             r = RunResult(workspace=tmp_path)
             ok, why = t.check(r)
             assert isinstance(ok, bool) and isinstance(why, str), t.id

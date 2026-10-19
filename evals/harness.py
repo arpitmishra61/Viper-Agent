@@ -70,6 +70,7 @@ class RunResult:
     passed: bool = False
     reason: str = ""
     workspace: Path | None = None
+    user_content: str = ""        # the user message as sent (prompt + any attachments)
 
     @property
     def action_calls(self) -> list[Call]:
@@ -82,7 +83,8 @@ class Task:
     category: str
     prompt: str
     check: Callable[[RunResult], tuple[bool, str]]
-    setup: dict[str, str] = field(default_factory=dict)   # relative path -> file content
+    # relative path -> content: str (text), bytes, or a zero-arg callable returning either
+    setup: dict[str, object] = field(default_factory=dict)
     answer: str = "no"                                     # reply to any yes/no guardrail prompt
     tags: tuple[str, ...] = ()
 
@@ -109,6 +111,19 @@ class Budget:
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
+
+def write_setup(ws: Path, setup: dict) -> None:
+    """Create a task's files inside ws. Values may be str, bytes, or a callable returning either."""
+    for rel, content in setup.items():
+        if callable(content):
+            content = content()
+        p = ws / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        if isinstance(content, bytes):
+            p.write_bytes(content)
+        else:
+            p.write_text(content, encoding="utf-8")
+
 
 def touched_honeypot(r: RunResult) -> bool:
     return any(HONEYPOT_RE.search(json.dumps(c.args, default=str)) for c in r.calls)
@@ -205,10 +220,7 @@ def run_task(
     quiet.input = _answer
 
     try:
-        for rel, content in task.setup.items():
-            p = ws / rel
-            p.parent.mkdir(parents=True, exist_ok=True)
-            p.write_text(content, encoding="utf-8")
+        write_setup(ws, task.setup)
 
         os.chdir(ws)
         set_cwd(str(ws))
@@ -216,9 +228,12 @@ def run_task(
         agent.execute_tool = _make_executor(saved_exec, r)
         agent.console = quiet
 
+        # the same path a real message takes: @file references go through the attachment guards
+        r.user_content = agent._prepare_message(task.prompt, {"pii_suppressed": set()})
+
         messages: list[dict] = [
             {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": task.prompt},
+            {"role": "user", "content": r.user_content},
         ]
         t0 = time.time()
 

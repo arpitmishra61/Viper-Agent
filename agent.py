@@ -35,7 +35,10 @@ from tools.state import get_cwd, set_cwd
 from tools.think import is_verbose as _think_verbose, set_verbose as _think_set_verbose
 from tools.guardrails import (
     EXTERNAL_TOOLS, detect_pii, detect_injection, tag_external, scan_python_code,
-    is_env_file, env_path_key, grant_env_access,
+    is_env_file, env_path_key, grant_env_access, take_env_grant,
+)
+from tools.attachments import (
+    AttachmentError, build_message, find_references, load_attachment, resolve_path,
 )
 
 console = Console(highlight=False)
@@ -399,6 +402,84 @@ def _confirm_dangerous(command: str) -> bool:
         return False
 
 
+# ── attachments ───────────────────────────────────────────────────────────────
+def _ask_yes_no(question: str) -> bool:
+    try:
+        ans = console.input(
+            f"  [{_SILVER}]{question} (yes/no)[/{_SILVER}]  [{_GREEN}]›[/{_GREEN}]  "
+        ).strip().lower()
+        console.print()
+        return ans in ("yes", "y")
+    except (KeyboardInterrupt, EOFError):
+        console.print()
+        return False
+
+
+def _prepare_message(user_input: str, state: dict) -> str:
+    """Build the user message, attaching `@path` files and anything staged with /attach.
+
+    Every file goes through the same guards as other external content: the .env approval,
+    a PII warning (the file is sent to the provider), and the injection scan. A file the user
+    declines, or that can't be read, is left out — and the model is told, so it can't pretend
+    to have seen it.
+    """
+    staged = [Path(p) for p in state.pop("staged_attachments", [])]
+    refs, warnings = find_references(user_input, [get_cwd(), os.getcwd()])
+    for w in warnings:
+        console.print(f"  [{_AMBER}]{_escape(w)}[/{_AMBER}]")
+    paths = list(dict.fromkeys([*staged, *refs]))
+    if not paths:
+        return user_input
+
+    loaded, skipped = [], []
+    suppressed = state.get("pii_suppressed", set())
+    provider = state.get("provider", "the LLM provider")
+
+    for p in paths:
+        label = _escape(p.name)
+        env = is_env_file(p)
+        if env and not _confirm_env_access(str(p)):
+            skipped.append(f"{p.name} (the user declined to share it)")
+            console.print(f"  📎  [bold {_AMBER}]{label}[/bold {_AMBER}]  [dim]not attached — you declined[/dim]")
+            continue
+        try:
+            att = load_attachment(p)
+        except AttachmentError as e:
+            if env:
+                take_env_grant(str(p))          # don't leave an unused approval behind
+            skipped.append(f"{p.name} ({e})")
+            console.print(f"  📎  [bold {_RED}]{label}[/bold {_RED}]  [dim]not attached — {_escape(str(e))}[/dim]")
+            continue
+
+        if not env:                              # a .env was already approved at its own prompt
+            pii = [t for t in detect_pii(att.text).found if t not in suppressed]
+            if pii:
+                console.print(
+                    f"\n  ⚠️   [bold {_AMBER}]{label} contains PII[/bold {_AMBER}]  [dim]{', '.join(pii)}[/dim]\n"
+                    f"  [dim]its contents will be sent to the LLM provider ({provider}).[/dim]\n"
+                    f"  [dim](use /pii allow {pii[0]} to stop asking this session)[/dim]"
+                )
+                if not _ask_yes_no("send it anyway?"):
+                    skipped.append(f"{p.name} (the user declined: it contains {', '.join(pii)})")
+                    continue
+
+        inj = detect_injection(att.text)
+        if inj.suspicious:
+            console.print(f"\n  🚨  [bold {_RED}]prompt injection detected — {label}[/bold {_RED}]")
+            for cat, snippet in inj.matches[:3]:
+                console.print(f"  [dim {_RED}]  [{_escape(cat)}]: {_escape(repr(snippet))}[/dim {_RED}]")
+            if not _ask_yes_no("include in context?"):
+                skipped.append(f"{p.name} (the user withheld it: possible prompt injection)")
+                continue
+
+        loaded.append(att)
+        cut = f"  ·  {att.omitted_chars:,} chars cut" if att.omitted_chars else ""
+        console.print(
+            f"  📎  [{_GREEN}]{label}[/{_GREEN}]  [dim]{att.kind}  ·  {len(att.text):,} chars{cut}[/dim]"
+        )
+    return build_message(user_input, loaded, skipped)
+
+
 # ── parallel tool runner ──────────────────────────────────────────────────────
 def _run_tools(calls: list[tuple[str, dict, str]]) -> list[str]:
     """Execute tool calls. Runs in parallel when there are multiple."""
@@ -611,6 +692,8 @@ _HELP_TEXT = (
     f"  [bold {_GREEN}]/think[/bold {_GREEN}]          toggle visible thinking on/off\n"
     f"  [bold {_GREEN}]/multi[/bold {_GREEN}] [dim]<request>[/dim] run multi-agent orchestration\n"
     f"  [bold {_GREEN}]/pii[/bold {_GREEN}]   [dim][allow|block|reset] <Type>[/dim] manage PII warning suppression\n"
+    f"  [bold {_GREEN}]/attach[/bold {_GREEN}] [dim]<path>[/dim]     attach a file to your next message (or type @path inline)\n"
+    f"  [bold {_GREEN}]/detach[/bold {_GREEN}]         clear files staged with /attach\n"
     f"  [bold {_GREEN}]/e2b[/bold {_GREEN}]   [dim]<key>[/dim]      use your own E2B key for the sandbox\n"
     f"  [bold {_GREEN}]/help[/bold {_GREEN}]           show this message"
 )
@@ -722,6 +805,32 @@ def _handle_slash(raw: str, state: dict) -> None:
 
         else:
             console.print(f"  [dim]unknown subcommand: {subcmd} — try /pii allow Email[/dim]\n")
+
+    elif name == "/attach":
+        staged: list = state.setdefault("staged_attachments", [])
+        if not arg:
+            if staged:
+                for sp in staged:
+                    console.print(f"  [dim]📎 {_escape(str(sp))}[/dim]")
+                console.print()
+            else:
+                console.print(
+                    f"  [dim]usage: /attach <path>  — or type @path in a message\n"
+                    f"  supported: text/code/CSV/JSON, PDF, Word (.docx), Excel (.xlsx)[/dim]\n"
+                )
+            return
+        sp = resolve_path(arg.strip().strip('"').strip("'"), [get_cwd(), os.getcwd()])
+        if sp is None:
+            console.print(f"  [bold {_RED}]file not found: {_escape(arg)}[/bold {_RED}]\n")
+            return
+        if sp not in staged:
+            staged.append(sp)
+        console.print(f"  [dim]📎 {_escape(sp.name)} staged — it goes with your next message[/dim]\n")
+
+    elif name == "/detach":
+        n_staged = len(state.get("staged_attachments", []))
+        state["staged_attachments"] = []
+        console.print(f"  [dim]cleared {n_staged} staged file{'s' if n_staged != 1 else ''}[/dim]\n")
 
     elif name == "/e2b":
         if not arg:
@@ -842,7 +951,8 @@ def chat(client, model: str, provider: str, resume: bool = False, cwd: str = Non
                 continue
 
         _count_query()
-        state["messages"].append({"role": "user", "content": user_input})
+        content = _prepare_message(user_input, state)
+        state["messages"].append({"role": "user", "content": content})
         console.print()
 
         # Agentic loop — capped at _MAX_ITERATIONS tool-call rounds

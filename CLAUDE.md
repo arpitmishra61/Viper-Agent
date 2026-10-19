@@ -200,6 +200,23 @@ never gets a grant, so it is refused by default.
 **Still hard-blocked** (no prompt, no override): `~/.ssh`, `~/.aws`, `~/.gnupg`, key files, and any
 *write/edit/list* of `.env`.
 
+#### 13. File attachments  (`tools/attachments.py`, `agent.py` → `_prepare_message`)
+**What:** type `@path` in a message (or `/attach <path>`, then send; `/detach` clears) to attach a file.
+Supported: text / code / CSV / JSON, PDF (`pypdf`), Word `.docx` (`python-docx`), Excel `.xlsx`/`.xlsm`
+(`openpyxl`; cell values only, formulas not shown). Not supported yet: images, audio/video, archives,
+legacy `.doc`/`.xls`/`.ppt`, scanned PDFs (no OCR). Parsers are imported lazily, so the agent runs
+without them and gives a `pip install` hint.  
+**How it reaches the model:** the file is extracted to text, capped (30k chars each, 60k per message),
+and appended to the user message as `<attachment name=… type=… path=… trust="untrusted">…</attachment>`.
+A `</attachment>` inside the file is neutralised so it can't end the block early. A file that is
+declined, blocked or unreadable is reported to the model as `[Not attached: …]` so it can't pretend
+to have read it.  
+**Guards:** same sensitive-path rules as the file tools (`check_path`); `.env` goes through the #12
+approval prompt; PII in the file asks yes/no before it is sent to the provider (`/pii allow <Type>`
+silences a type); the injection scan asks before including a suspicious file.  
+**Not covered:** instructions hidden in non-text content (there is none yet — images are unsupported).
+`@` must start a word, so `bob@example.com` is never an attachment; `@alice` is left as plain text.
+
 ---
 
 ## Where each guardrail fires
