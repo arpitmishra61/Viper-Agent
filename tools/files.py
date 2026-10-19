@@ -1,12 +1,22 @@
 from pathlib import Path
 
-from tools.guardrails import check_path
+from tools.guardrails import check_path, is_env_file, mask_env, take_env_grant
 
 _MAX_READ_BYTES = 50 * 1024  # 50 KB
 
 
 def read_file(path: str) -> str:
-    blocked = check_path(path)
+    # .env files open only with a one-time user approval (see guardrails "human-in-the-loop")
+    env_mode = None
+    if is_env_file(path):
+        env_mode = take_env_grant(path)
+        if env_mode is None:
+            return (
+                f"Blocked: '{Path(path).name}' is a secrets file and needs the user's approval, which "
+                "was not granted for this call. Approval is requested automatically when read_file is "
+                "called on it from the main agent loop."
+            )
+    blocked = check_path(path, allow_env=env_mode is not None)
     if blocked:
         return blocked
     try:
@@ -19,7 +29,8 @@ def read_file(path: str) -> str:
         if size > _MAX_READ_BYTES:
             return f"File too large ({size // 1024} KB). Max is 50 KB."
         try:
-            return p.read_text(encoding="utf-8")
+            text = p.read_text(encoding="utf-8")
+            return mask_env(text) if env_mode == "masked" else text
         except UnicodeDecodeError:
             return "Cannot read binary file — only text files are supported."
     except Exception as e:

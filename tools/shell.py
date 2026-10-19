@@ -2,6 +2,7 @@ import os
 import re
 import subprocess
 
+from tools.guardrails import check_command
 from tools.state import get_cwd, set_cwd
 
 _DEFAULT_TIMEOUT = 60
@@ -14,6 +15,11 @@ def run_shell(command: str, cwd: str = None, timeout: int = _DEFAULT_TIMEOUT,
     if sandbox:
         from tools.sandbox import run_shell_in_sandbox
         return run_shell_in_sandbox(command, timeout=min(timeout, 300))
+
+    # Same sensitive-file protection the file tools have — fires before anything runs
+    blocked = check_command(command)
+    if blocked:
+        return blocked
 
     effective_cwd = cwd or get_cwd()
     cmd = command.strip()

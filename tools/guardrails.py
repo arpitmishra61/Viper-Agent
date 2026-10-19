@@ -1,7 +1,9 @@
 """Security guardrails: PII detection, prompt-injection detection, path/URL safety."""
 
+import fnmatch
 import ipaddress
 import re
+import threading
 import socket as _socket
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -117,8 +119,114 @@ _SENSITIVE_FILENAMES: frozenset[str] = frozenset({
 })
 
 
-def check_path(path_str: str) -> str | None:
-    """Return an error string if path is blocked (traversal or sensitive); None if safe."""
+# ── .env access (human-in-the-loop) ───────────────────────────────────────────
+# Reading a .env file is sometimes legitimate ("is OPENAI_API_KEY set?"), so read_file may open
+# one — but only after the user approves it at a prompt. Approval is NOT a tool argument (any
+# code path that calls tools directly could forge that); it is a one-time grant that only the
+# confirmation prompt in agent.py can create. Without a grant, read_file refuses.
+
+_ENV_FILE_RE = re.compile(r"^\.env(?:\.[\w.-]+)?$", re.I)
+_ENV_TEMPLATE_SUFFIXES = frozenset({"example", "sample", "template", "dist"})
+
+
+def is_env_file(path_str) -> bool:
+    """True for .env and .env.<anything> (secrets), False for .env.example-style templates."""
+    try:
+        name = Path(path_str).expanduser().name
+    except Exception:
+        return False
+    if not _ENV_FILE_RE.match(name):
+        return False
+    return name.rsplit(".", 1)[-1].lower() not in _ENV_TEMPLATE_SUFFIXES
+
+
+_env_grants: dict[str, list[str]] = {}
+_env_lock = threading.Lock()
+
+
+def env_path_key(path_str) -> str:
+    try:
+        return str(Path(path_str).expanduser().resolve()).lower()
+    except Exception:
+        return str(path_str).lower()
+
+
+def grant_env_access(path_str: str, mode: str) -> None:
+    """Record a one-time approval. mode: 'full' (real values) or 'masked' (key names only)."""
+    if mode not in ("full", "masked"):
+        raise ValueError(f"unknown env access mode: {mode!r}")
+    with _env_lock:
+        _env_grants.setdefault(env_path_key(path_str), []).append(mode)
+
+
+def take_env_grant(path_str: str) -> str | None:
+    """Consume one approval for this path; None if there isn't one."""
+    key = env_path_key(path_str)
+    with _env_lock:
+        modes = _env_grants.get(key)
+        if not modes:
+            return None
+        mode = modes.pop(0)
+        if not modes:
+            del _env_grants[key]
+        return mode
+
+
+_ENV_LINE_RE = re.compile(r"^(\s*(?:export\s+)?[A-Za-z_][\w.-]*\s*=\s*)(.*)$")
+_PLACEHOLDER_RE = re.compile(r"(?i)^(?:your[_-]|change[_-]?me|x{3,}$|todo|placeholder|<.*>$|\.\.\.$)")
+
+
+def _mask_value(raw: str) -> str:
+    v = raw.strip()
+    if len(v) >= 2 and v[0] == v[-1] and v[0] in "'\"":
+        v = v[1:-1]
+    if not v:
+        return "<empty>"
+    if _PLACEHOLDER_RE.match(v):
+        return f"<placeholder-looking, {len(v)} chars>"
+    return f"<set, {len(v)} chars>"
+
+
+def mask_env(text: str) -> str:
+    """Hide every value in a .env file; keep key names, comments and structure.
+
+    Answers "which keys exist / are they empty or placeholders" without exposing a secret.
+    Anything that can't be parsed as KEY=value is redacted rather than guessed at.
+    """
+    out: list[str] = []
+    open_quote: str | None = None            # inside a multi-line quoted value
+    for line in text.splitlines():
+        if open_quote:
+            if line.rstrip().endswith(open_quote):
+                open_quote = None
+            continue
+        stripped = line.strip()
+        if not stripped:
+            out.append("")
+            continue
+        if stripped.startswith("#"):
+            out.append("# <comment redacted>" if detect_pii(line).has_pii else line)
+            continue
+        m = _ENV_LINE_RE.match(line)
+        if not m:
+            out.append("<unparsed line redacted>")
+            continue
+        prefix, raw = m.groups()
+        v = raw.strip()
+        if v[:1] in ("'", '"') and not (len(v) >= 2 and v.endswith(v[0])):
+            open_quote = v[0]
+            out.append(prefix + "<set, multi-line>")
+            continue
+        out.append(prefix + _mask_value(raw))
+    return "\n".join(out) + ("\n" if text.endswith("\n") else "")
+
+
+def check_path(path_str: str, allow_env: bool = False) -> str | None:
+    """Return an error string if path is blocked (traversal or sensitive); None if safe.
+
+    allow_env: skip only the .env filename block (the caller holds a user approval for it).
+    Traversal and sensitive-directory checks always apply.
+    """
     try:
         raw = Path(path_str).expanduser()
     except Exception as e:
@@ -141,9 +249,70 @@ def check_path(path_str: str) -> str | None:
             return f"Blocked: access to sensitive path '{resolved_str}'"
 
     # Sensitive filename check
-    if resolved.name in _SENSITIVE_FILENAMES:
+    if resolved.name in _SENSITIVE_FILENAMES and not (allow_env and is_env_file(path_str)):
         return f"Blocked: access to sensitive file '{resolved.name}'"
 
+    return None
+
+
+# ── Shell command path security ───────────────────────────────────────────────
+# check_path() only protects the file tools. A model that is refused by read_file can
+# simply `type .env` through run_shell, so commands get the same treatment.
+#
+# This is a heuristic on the command text, not a sandbox: it catches the direct and the
+# lightly-obfuscated ways of naming these files. Anything built at runtime (string
+# concatenation, variables, encoded payloads) or a bare `*` glob in cmd.exe is not caught.
+
+_SHELL_NAMES = sorted(n for n in _SENSITIVE_FILENAMES if n not in (".env", "credentials"))
+_SHELL_NAME_ALT = "|".join(re.escape(n) for n in _SHELL_NAMES)
+
+# .env and .env.local-style files, but not the usual committed templates
+_SHELL_ENV_RE = re.compile(r"(?<![\w.-])\.env(?![\w-])(?!\.(?:example|sample|template|dist)\b)", re.I)
+
+_SHELL_SENSITIVE_RES: list[re.Pattern] = [
+    # key / credential files by name (public keys excluded)
+    re.compile(rf"(?<![\w-])(?:{_SHELL_NAME_ALT})(?![\w-])(?!\.pub\b)", re.I),
+    # sensitive directories
+    re.compile(r"(?<![\w.-])\.(?:ssh|aws|gnupg)(?![\w.-])", re.I),
+    re.compile(r"(?<![\w-])\.viper/\.key\b", re.I),
+    re.compile(r"microsoft/credentials\b", re.I),
+]
+
+# Names a wildcard could expand to (`cat .e*`, `type id_*`)
+_GLOB_TARGETS: list[str] = [*_SHELL_NAMES, ".env", ".ssh", ".aws", ".gnupg"]
+
+
+def _glob_hit(command: str) -> str | None:
+    for token in re.split(r"[\s|&;<>()\"']+", command):
+        if not any(c in token for c in "*?["):
+            continue
+        base = token.rsplit("/", 1)[-1].lower()
+        if len(re.sub(r"[*?\[\]]", "", base)) < 2:      # `*`, `?`, `*e*` are too broad to treat as a probe
+            continue
+        for target in _GLOB_TARGETS:
+            if target.startswith(".") and not base.startswith("."):
+                continue                                 # shells don't expand * to dotfiles
+            if fnmatch.fnmatchcase(target.lower(), base):
+                return token
+    return None
+
+
+def check_command(command: str) -> str | None:
+    """Return an error string if a shell command names a sensitive file/dir; None if it looks safe."""
+    cmd = command.replace("\\", "/")
+    m = _SHELL_ENV_RE.search(cmd)
+    if m:
+        return (
+            f"Blocked: command references sensitive file '{m.group(0).strip()}'. Shell access to .env "
+            "files is not allowed — to inspect one, call read_file on it; the user will be asked to approve."
+        )
+    for pat in _SHELL_SENSITIVE_RES:
+        m = pat.search(cmd)
+        if m:
+            return f"Blocked: command references sensitive file or directory '{m.group(0).strip()}'"
+    hit = _glob_hit(cmd)
+    if hit:
+        return f"Blocked: wildcard '{hit}' could expand to a sensitive file"
     return None
 
 

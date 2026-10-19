@@ -19,6 +19,7 @@ except ImportError:
 from rich.console import Console
 from rich.live import Live
 from rich.markdown import Markdown
+from rich.markup import escape as _escape
 from rich.panel import Panel
 from rich.rule import Rule
 from rich.spinner import Spinner
@@ -32,7 +33,10 @@ from system_prompt import SYSTEM_PROMPT
 from tools import TOOL_DEFINITIONS, execute_tool
 from tools.state import get_cwd, set_cwd
 from tools.think import is_verbose as _think_verbose, set_verbose as _think_set_verbose
-from tools.guardrails import EXTERNAL_TOOLS, detect_pii, detect_injection, tag_external, scan_python_code
+from tools.guardrails import (
+    EXTERNAL_TOOLS, detect_pii, detect_injection, tag_external, scan_python_code,
+    is_env_file, env_path_key, grant_env_access,
+)
 
 console = Console(highlight=False)
 
@@ -120,6 +124,9 @@ _DEEP_DANGEROUS_RE = re.compile(
 # ── session rate limiter ───────────────────────────────────────────────────────
 _session_tool_calls: int = 0
 _MAX_SESSION_TOOL_CALLS: int = 200
+
+# .env files the user has refused this session — the model isn't asked about them again
+_env_denied: set[str] = set()
 
 # ── session storage ───────────────────────────────────────────────────────────
 _SESSIONS_DIR = Path.home() / ".viper" / "sessions"
@@ -346,6 +353,36 @@ def _confirm_python(code: str, dangers: list[str]) -> bool:
         return ans in ("yes", "y")
     except (KeyboardInterrupt, EOFError):
         return False
+def _confirm_env_access(path: str) -> bool:
+    """Human-in-the-loop gate for reading a .env file. Creates a one-time grant on approval."""
+    key = env_path_key(path)
+    if key in _env_denied:
+        return False
+    console.print(
+        f"\n  🔑  [bold {_AMBER}]the agent wants to read a secrets file[/bold {_AMBER}]\n"
+        f"  [dim {_AMBER}]{'─' * 50}[/dim {_AMBER}]\n"
+        f"  [dim]{_escape(str(path)[:200])}[/dim]\n"
+        f"  [dim]yes    = full contents (secret values are sent to the LLM provider)[/dim]\n"
+        f"  [dim]masked = key names only, values hidden[/dim]\n"
+        f"  [dim]no     = refuse[/dim]\n"
+    )
+    try:
+        ans = console.input(
+            f"  [{_SILVER}]allow? (yes/masked/no)[/{_SILVER}]  [{_GREEN}]›[/{_GREEN}]  "
+        ).strip().lower()
+        console.print()
+    except (KeyboardInterrupt, EOFError):
+        ans = ""
+    if ans in ("yes", "y"):
+        grant_env_access(path, "full")
+        return True
+    if ans in ("masked", "mask", "m"):
+        grant_env_access(path, "masked")
+        return True
+    _env_denied.add(key)
+    return False
+
+
 def _confirm_dangerous(command: str) -> bool:
     console.print(
         f"\n  🚨  [bold {_RED}]dangerous command[/bold {_RED}]\n"
@@ -394,6 +431,8 @@ def _run_tools(calls: list[tuple[str, dict, str]]) -> list[str]:
                 vetted.append(_confirm_python(args.get("code", ""), dangers))
             else:
                 vetted.append(True)
+        elif name == "read_file" and is_env_file(args.get("path", "")):
+            vetted.append(_confirm_env_access(args["path"]))
         else:
             vetted.append(True)
 

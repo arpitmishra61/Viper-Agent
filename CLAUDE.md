@@ -176,6 +176,30 @@ with a BLOCKED message and the limit is surfaced to the user.
 exhausted or the 20-iteration cap is hit per turn. The session-level cap adds a hard ceiling
 across the whole session, not just one turn.
 
+#### 11. Shell sensitive-file guard  (`tools/shell.py` via `guardrails.check_command`)
+**What:** `run_shell` (host branch only — the E2B sandbox can't see local files) scans the command
+text before running anything and blocks references to `.env`, `.env.*` (not `.example`/`.sample`/
+`.template`/`.dist`), key files (`id_rsa`, `id_ed25519`, `authorized_keys`, …), `~/.ssh`, `~/.aws`,
+`~/.gnupg`, `~/.viper/.key`, and wildcards that would expand to them (`cat .e*`). For `.env` the
+error tells the model to use `read_file` (which asks the user, see #12).  
+**Why:** `check_path` only protected the four file tools. In an eval, a model refused by `read_file`
+simply ran `type .env` through `run_shell` and the secret reached the model.  
+**Limits (heuristic, not a sandbox):** names built at runtime (`open('.en'+'v')`), quote-splitting
+(`.e""nv`) and a bare `*` in cmd.exe are not caught (pinned as strict xfail tests). **`run_python` is
+still unguarded** — `open('.env').read()` works there.
+
+#### 12. Human-in-the-loop for `.env`  (`agent.py` → `_confirm_env_access`, `tools/files.py`)
+**What:** `read_file` on `.env` / `.env.*` (not templates) works only after the user approves at a
+prompt: **yes** (full contents), **masked** (key names; values shown as `<set, N chars>`, `<empty>`
+or `<placeholder-looking>`), or **no**. Anything else, Ctrl+C or EOF means no, and a refusal is
+remembered for the session so the model can't nag. Approval is single-use per read.  
+**How it can't be forged:** the approval is not a tool argument. `_run_tools` asks the user, then
+records a one-time grant in `guardrails` (`grant_env_access`); `read_file` consumes it
+(`take_env_grant`). Code that calls `execute_tool` directly — e.g. `orchestrator.py` sub-agents —
+never gets a grant, so it is refused by default.  
+**Still hard-blocked** (no prompt, no override): `~/.ssh`, `~/.aws`, `~/.gnupg`, key files, and any
+*write/edit/list* of `.env`.
+
 ---
 
 ## Where each guardrail fires
@@ -424,5 +448,8 @@ sandboxed call — defense in depth matters even with isolation.
 - Native token counting (currently uses chars/4 approximation; provider usage field varies)
 - Google Drive / GitHub / Slack tools (need OAuth2 or PAT)
 - Firecrawl integration (FIRECRAWL_API_KEY placeholder present in .env but no tool file)
-- Test suite — zero test coverage across all tools and the agent loop
+- Broader tests — `tests/` covers guardrails, shell regexes, `_run_tools`, files, calculator, shell `cd`,
+  sessions and the tool registry (run: `venv\Scripts\python.exe -m pytest tests`). Still missing: a
+  mocked-LLM test of `chat()`, `http_fetch`/`browser`/`github`/`sandbox`, and real-model evals.
+  Known defects are pinned as strict `xfail` tests (see `TestKnownBugs` / `TestKnownGaps`)
 - Write confirmation prompt for `write_file` / `edit_file` on existing files

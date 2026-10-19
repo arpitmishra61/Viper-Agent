@@ -47,3 +47,4 @@ tmp*.py
 
 #PDF
 *.pdf
+evals/results/
