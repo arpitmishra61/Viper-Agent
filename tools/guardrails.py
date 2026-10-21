@@ -1,5 +1,6 @@
 """Security guardrails: PII detection, prompt-injection detection, path/URL safety."""
 
+import ast
 import fnmatch
 import ipaddress
 import re
@@ -398,6 +399,46 @@ _DANGEROUS_PY: list[tuple[re.Pattern, str]] = [
 ]
 
 
+def _scan_python_env_access(code: str) -> list[str]:
+    """AST-scan for open('.env') and Path('.env').read_* in Python code.
+
+    This closes the gap where check_path/check_command protect the file tools and
+    shell tool but run_python can still reach .env via the stdlib open() or pathlib.
+    """
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return []  # syntax errors are the runtime's problem
+
+    findings: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+
+        # open('.env', ...) or open(".env.local", ...)
+        if isinstance(func, ast.Name) and func.id == "open" and node.args:
+            arg = node.args[0]
+            if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                if is_env_file(arg.value):
+                    findings.append(f"open('{arg.value}') reads a secrets file")
+
+        # pathlib.Path('.env').read_text() / .read_bytes() / .open()
+        if isinstance(func, ast.Attribute) and func.attr in ("read_text", "read_bytes", "open"):
+            inner = func.value
+            if isinstance(inner, ast.Call) and inner.args:
+                inner_arg = inner.args[0]
+                if isinstance(inner_arg, ast.Constant) and isinstance(inner_arg.value, str):
+                    if is_env_file(inner_arg.value):
+                        findings.append(
+                            f"Path('{inner_arg.value}').{func.attr}() reads a secrets file"
+                        )
+
+    return findings
+
+
 def scan_python_code(code: str) -> list[str]:
     """Return list of dangerous pattern descriptions found in code (empty = clean)."""
-    return [desc for pat, desc in _DANGEROUS_PY if pat.search(code)]
+    findings = [desc for pat, desc in _DANGEROUS_PY if pat.search(code)]
+    findings.extend(_scan_python_env_access(code))
+    return findings

@@ -8,6 +8,10 @@ from tools.state import get_cwd, set_cwd
 _DEFAULT_TIMEOUT = 60
 _CD_RE = re.compile(r'^cd\s*(.*)', re.IGNORECASE)
 
+# When set by agent.py, run_shell calls this for each output line in real time.
+# None = use the original capture_output approach.
+_stream_cb = None  # callable(line: str) | None
+
 
 def run_shell(command: str, cwd: str = None, timeout: int = _DEFAULT_TIMEOUT,
               sandbox: bool = True) -> str:
@@ -35,14 +39,18 @@ def run_shell(command: str, cwd: str = None, timeout: int = _DEFAULT_TIMEOUT,
             return f"Changed directory to: {new_path}"
         return f"Directory not found: {new_path}"
 
+    cb = _stream_cb  # snapshot — avoid TOCTOU if another thread clears it mid-run
+    if cb is not None:
+        return _run_streaming(command, effective_cwd, min(timeout, 300), cb)
+    return _run_captured(command, effective_cwd, min(timeout, 300))
+
+
+def _run_captured(command: str, cwd: str, timeout: int) -> str:
+    """Original non-streaming path: capture stdout+stderr separately."""
     try:
         result = subprocess.run(
-            command,
-            shell=True,
-            capture_output=True,
-            text=True,
-            timeout=min(timeout, 300),
-            cwd=effective_cwd,
+            command, shell=True, capture_output=True,
+            text=True, timeout=timeout, cwd=cwd,
         )
         parts = []
         if result.stdout.strip():
@@ -54,6 +62,33 @@ def run_shell(command: str, cwd: str = None, timeout: int = _DEFAULT_TIMEOUT,
         return "\n\n".join(parts) if parts else "(command completed, no output)"
     except subprocess.TimeoutExpired:
         return f"Timeout: command exceeded {timeout}s"
+    except Exception as e:
+        return f"Error running shell command: {e}"
+
+
+def _run_streaming(command: str, cwd: str, timeout: int, cb) -> str:
+    """Streaming path: merge stdout+stderr and call cb() for each line as it arrives."""
+    try:
+        proc = subprocess.Popen(
+            command, shell=True,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, encoding="utf-8", errors="replace",
+            cwd=cwd,
+        )
+        lines: list[str] = []
+        try:
+            for raw in proc.stdout:
+                line = raw.rstrip("\n").rstrip("\r")
+                lines.append(line)
+                cb(line)
+            proc.wait(timeout=2)  # stdout exhausted → process already done
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            return f"Timeout: command exceeded {timeout}s"
+
+        if proc.returncode != 0:
+            lines.append(f"Exit code: {proc.returncode}")
+        return "\n".join(lines) if lines else "(command completed, no output)"
     except Exception as e:
         return f"Error running shell command: {e}"
 

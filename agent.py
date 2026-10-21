@@ -585,12 +585,31 @@ def _run_tools(calls: list[tuple[str, dict, str]], state: dict | None = None) ->
         if _think_verbose():
             _show_thought(calls[i][1].get("thought", ""))
 
-    # Execute action tools — spinner for single, parallel for multiple
+    # Execute action tools — streaming for single local shell, spinner for single other,
+    # parallel executor for multiple
     if len(action_indices) == 1:
         i = action_indices[0]
-        idx, result, elapsed = _run_one_with_spinner(i, calls[i][0], calls[i][1])
-        _show_tool_done(calls[i][0], elapsed)
-        results[i] = result
+        name, args, _ = calls[i]
+        if vetted[i] and name == "run_shell" and not args.get("sandbox", True):
+            # Live streaming display for long-running local shell commands
+            import tools.shell as _shell_mod
+            from rich.markup import escape as _resc
+            t0 = time.time()
+            console.print()
+            def _shell_line_cb(line: str) -> None:
+                console.print(f"  [dim {_SILVER}]{_resc(line)}[/dim {_SILVER}]")
+            _shell_mod._stream_cb = _shell_line_cb
+            try:
+                result = execute_tool(name, args)
+            finally:
+                _shell_mod._stream_cb = None
+            elapsed = time.time() - t0
+            _show_tool_done(name, elapsed)
+            results[i] = _truncate_result(result)
+        else:
+            idx, result, elapsed = _run_one_with_spinner(i, calls[i][0], calls[i][1])
+            _show_tool_done(calls[i][0], elapsed)
+            results[i] = result
     elif action_indices:
         with ThreadPoolExecutor(max_workers=min(len(action_indices), 4)) as ex:
             futures = {

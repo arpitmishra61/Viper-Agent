@@ -147,17 +147,17 @@ iam/security-credentials/" would hand AWS credentials to the attacker. This chec
 the tool level before any network I/O.
 
 #### 8. Python code static analysis  (`agent.py` → `_run_tools()` vetting via `guardrails.scan_python_code`)
-**What:** Before executing any `run_python` call, `scan_python_code()` scans the code for:
-- `ctypes` (direct memory/OS access not achievable via other tools)
-- `exec()` or `eval()` with encoded payloads (obfuscated execution)
-- `__import__()` (dynamic import bypass)
-- `winreg` (Windows Registry access)  
-**Why:** Unlike `subprocess` or `open()` (which are redundant with `run_shell`/`write_file` and
-thus don't add new attack surface), these patterns represent capabilities the agent doesn't have
-via any other tool. An injected `run_python` call with `ctypes` could escape any software-level
-guard.  
+**What:** Before executing any `run_python` call, `scan_python_code()` runs two checks:
+- Regex patterns: `ctypes`, `exec()`/`eval()` with encoded payloads, `__import__()`, `winreg`
+- AST scan (`_scan_python_env_access`): `open('.env', ...)` and `Path('.env').read_*()` where
+  the path is a string literal — closes the gap where `check_path`/`check_command` protected the
+  file and shell tools but `run_python` could still read `.env` via `open()` directly  
+**Why:** The AST scan closes the last major gap: a model refused by `read_file` and `run_shell`
+could previously use `run_python` with `open('.env').read()` to exfiltrate secrets.  
 **Behaviour:** Same confirmation pattern as the shell dangerous-command guard — shows the
-detected patterns, previews the code, and asks yes/no.
+detected patterns, previews the code, and asks yes/no.  
+**Limits (AST scan):** Only catches literal string paths. Runtime-built paths
+(`open('.' + 'env')`) are not caught — still a known xfail.
 
 #### 9. Deeper shell pattern detection  (`agent.py` → `_DEEP_DANGEROUS_RE`)
 **What:** A second regex (`_DEEP_DANGEROUS_RE`) catches obfuscated attacks the original
@@ -507,7 +507,6 @@ sandboxed call — defense in depth matters even with isolation.
 
 - True local sandboxing (Docker/seccomp) — E2B covers the cloud case; local-only deployments
   without E2B still execute run_shell/run_python on the host
-- Streaming output for long-running shell commands (currently shows result only on completion)
 - Native token counting (currently uses chars/4 approximation; provider usage field varies)
 - Google Drive / GitHub / Slack tools (need OAuth2 or PAT)
 - Firecrawl integration (FIRECRAWL_API_KEY placeholder present in .env but no tool file)
@@ -519,6 +518,23 @@ sandboxed call — defense in depth matters even with isolation.
 - Semantic/vector memory — current memory is key-value (simple but not retrieved by relevance);
   upgrading to ChromaDB + sentence-transformers would enable recall by similarity instead of keyword
 - RAG for document Q&A — no chunking/embedding pipeline; large PDFs are loaded whole into context
+
+### Guardrail gap closed: run_python .env access (tools/guardrails.py)
+
+`_scan_python_env_access()` uses Python's `ast` module to walk the code AST before execution.
+Catches `open('.env', ...)` and `pathlib.Path('.env').read_text()` / `.read_bytes()` / `.open()` patterns
+where the path is a string literal. On match, appends to `scan_python_code()` findings — same
+confirmation prompt fires as for ctypes/exec-encoded patterns. Still limited to literal paths (no
+runtime variable resolution), pinned in xfail tests.
+
+### Streaming shell output (tools/shell.py + agent.py)
+
+`run_shell` now has two paths: captured (original) and streaming. When `agent._run_tools()` detects
+a single local (non-sandbox) `run_shell` call, it:
+1. Sets `tools.shell._stream_cb` to a Rich console line printer
+2. Calls `execute_tool` — `run_shell` uses `Popen` + `stderr=STDOUT` to emit each line live
+3. Clears `_stream_cb` in a `finally` block
+Multiple parallel tools still use the original captured path (no interleaved console noise).
 
 ## Agent intelligence features (added)
 
