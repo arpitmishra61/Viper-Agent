@@ -29,7 +29,7 @@ import auth
 import onboarding
 from auth import get_or_create_key as _get_or_create_key
 from providers import PROVIDERS, get_client
-from system_prompt import SYSTEM_PROMPT
+from system_prompt import build_system_prompt
 from tools import TOOL_DEFINITIONS, execute_tool
 from tools.state import get_cwd, set_cwd
 from tools.think import is_verbose as _think_verbose, set_verbose as _think_set_verbose
@@ -56,6 +56,10 @@ _ORANGE = "#fb923c"
 # ── tool icons ────────────────────────────────────────────────────────────────
 _TOOL_ICONS: dict[str, str] = {
     "think":                        "🧠",
+    "save_memory":                  "💾",
+    "list_memories":                "💾",
+    "delete_memory":                "💾",
+    "search_memory":                "💾",
     "web_search":                   "🔍",
     "browser":                      "🌐",
     "run_shell":                    "🖥 ",
@@ -66,6 +70,7 @@ _TOOL_ICONS: dict[str, str] = {
     "edit_file":                    "🔧",
     "list_dir":                     "📂",
     "calculate":                    "🧮",
+    "use_skill":                    "📘",
     "github_set_token":             "🔑",
     "github_get_repo":              "🐙",
     "github_list_issues":           "🐙",
@@ -481,7 +486,7 @@ def _prepare_message(user_input: str, state: dict) -> str:
 
 
 # ── parallel tool runner ──────────────────────────────────────────────────────
-def _run_tools(calls: list[tuple[str, dict, str]]) -> list[str]:
+def _run_tools(calls: list[tuple[str, dict, str]], state: dict | None = None) -> list[str]:
     """Execute tool calls. Runs in parallel when there are multiple."""
     n = len(calls)
     if n == 0:
@@ -632,6 +637,11 @@ def _run_tools(calls: list[tuple[str, dict, str]]) -> list[str]:
         if name in EXTERNAL_TOOLS:
             result = tag_external(name, result)
 
+        # 4. If a memory was saved/deleted, refresh system prompt so the new fact
+        #    is visible to the model in the same session without a restart.
+        if name in ("save_memory", "delete_memory") and state:
+            state["messages"][0]["content"] = build_system_prompt()
+
         results[i] = result
 
     return results
@@ -686,6 +696,7 @@ _HELP_TEXT = (
     f"  [bold {_GREEN}]/clear[/bold {_GREEN}]          wipe conversation history\n"
     f"  [bold {_GREEN}]/model[/bold {_GREEN}] [dim]<name>[/dim]    switch model mid-session\n"
     f"  [bold {_GREEN}]/tools[/bold {_GREEN}]          list available tools\n"
+    f"  [bold {_GREEN}]/skills[/bold {_GREEN}]         list skills  ·  [bold {_GREEN}]/skill[/bold {_GREEN}] [dim]<name>[/dim] load one into this chat\n"
     f"  [bold {_GREEN}]/save[/bold {_GREEN}]  [dim][file][/dim]    save session to JSON\n"
     f"  [bold {_GREEN}]/cwd[/bold {_GREEN}]   [dim][path][/dim]    show or change working directory\n"
     f"  [bold {_GREEN}]/tokens[/bold {_GREEN}]         show context size\n"
@@ -694,6 +705,7 @@ _HELP_TEXT = (
     f"  [bold {_GREEN}]/pii[/bold {_GREEN}]   [dim][allow|block|reset] <Type>[/dim] manage PII warning suppression\n"
     f"  [bold {_GREEN}]/attach[/bold {_GREEN}] [dim]<path>[/dim]     attach a file to your next message (or type @path inline)\n"
     f"  [bold {_GREEN}]/detach[/bold {_GREEN}]         clear files staged with /attach\n"
+    f"  [bold {_GREEN}]/memory[/bold {_GREEN}]         list saved memories  ·  [bold {_GREEN}]/memory forget[/bold {_GREEN}] [dim]<key>[/dim] remove one  ·  [bold {_GREEN}]/memory clear[/bold {_GREEN}] wipe all\n"
     f"  [bold {_GREEN}]/e2b[/bold {_GREEN}]   [dim]<key>[/dim]      use your own E2B key for the sandbox\n"
     f"  [bold {_GREEN}]/help[/bold {_GREEN}]           show this message"
 )
@@ -722,6 +734,30 @@ def _handle_slash(raw: str, state: dict) -> None:
             d = t["function"]["description"].split(".")[0][:60]
             console.print(f"  [{_AMBER}]{n:<18}[/{_AMBER}] [dim]{d}[/dim]")
         console.print()
+
+    elif name == "/skills":
+        from tools.skills import discover
+        found = discover()
+        console.print(f"\n  [dim]skills ({len(found)}):[/dim]")
+        for s in found.values():
+            console.print(f"  [{_AMBER}]{s.name:<20}[/{_AMBER}] [dim]{_escape(s.description[:70])}[/dim]")
+        console.print()
+
+    elif name == "/skill":
+        from tools.skills import use_skill
+        if not arg:
+            console.print(f"  [dim]usage: /skill <name>  (see /skills)[/dim]\n")
+        else:
+            text = use_skill(arg)
+            if text.startswith("# Skill:"):
+                state["messages"].append({
+                    "role": "user",
+                    "content": f"[/skill {arg}] Use this playbook for the next task.\n\n{text}",
+                })
+                state["messages"].append({"role": "assistant", "content": f"Skill '{arg}' loaded."})
+                console.print(f"  [dim]skill {_escape(arg)} loaded into this chat[/dim]\n")
+            else:
+                console.print(f"  [bold {_RED}]{_escape(text)}[/bold {_RED}]\n")
 
     elif name == "/save":
         saved = _save_session(state["messages"], state["provider"], state["model"])
@@ -832,6 +868,37 @@ def _handle_slash(raw: str, state: dict) -> None:
         state["staged_attachments"] = []
         console.print(f"  [dim]cleared {n_staged} staged file{'s' if n_staged != 1 else ''}[/dim]\n")
 
+    elif name == "/memory":
+        from tools.memory import list_memories, delete_memory, _MEMORY_FILE, _save
+        sub = arg.split(None, 1)
+        subcmd = sub[0].lower() if sub else ""
+        subarg = sub[1].strip() if len(sub) > 1 else ""
+
+        if not subcmd or subcmd == "list":
+            text = list_memories()
+            console.print(f"\n  [dim]memories:[/dim]")
+            for line in text.splitlines():
+                console.print(f"  [{_VIOLET}]•[/{_VIOLET}] [dim]{_escape(line)}[/dim]")
+            console.print()
+
+        elif subcmd == "forget":
+            if not subarg:
+                console.print(f"  [dim]usage: /memory forget <key>[/dim]\n")
+            else:
+                result = delete_memory(subarg)
+                console.print(f"  [dim]{_escape(result)}[/dim]\n")
+                # Refresh system prompt so model no longer sees the deleted memory
+                state["messages"][0]["content"] = build_system_prompt()
+
+        elif subcmd == "clear":
+            if _MEMORY_FILE.exists():
+                _save({"entries": []})
+            console.print(f"  [dim]all memories cleared[/dim]\n")
+            state["messages"][0]["content"] = build_system_prompt()
+
+        else:
+            console.print(f"  [dim]usage: /memory  |  /memory forget <key>  |  /memory clear[/dim]\n")
+
     elif name == "/e2b":
         if not arg:
             console.print(f"  [dim]usage: /e2b <your E2B API key>  (get one at https://e2b.dev)[/dim]\n")
@@ -873,13 +940,18 @@ def chat(client, model: str, provider: str, resume: bool = False, cwd: str = Non
     from tools.multiagent import init as _init_multiagent
     _init_multiagent(client, model)
 
-    system_msg = {"role": "system", "content": SYSTEM_PROMPT}
+    system_msg = {"role": "system", "content": build_system_prompt()}
     messages = [system_msg]
 
     if resume:
         session = _load_last_session()
         if session:
             messages = session.get("messages", [system_msg])
+            # a saved session carries the old prompt; swap in the current prompt and skills index
+            if messages and messages[0].get("role") == "system":
+                messages[0] = system_msg
+            else:
+                messages.insert(0, system_msg)
             console.print(f"  [dim]resumed · {len(messages)} messages[/dim]")
         else:
             console.print(f"  [dim]no saved session found[/dim]")
@@ -978,7 +1050,7 @@ def chat(client, model: str, provider: str, resume: bool = False, cwd: str = Non
                         args = {}
                     calls.append((name, args, tc["id"]))
 
-                results = _run_tools(calls)
+                results = _run_tools(calls, state)
 
                 for (name, args, tc_id), result in zip(calls, results):
                     state["messages"].append({

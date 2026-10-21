@@ -5,7 +5,9 @@
 A minimal terminal conversational agent built in Python. Supports multiple LLM providers via the
 OpenAI-compatible API format (one SDK, swap `base_url`). Full modern agent capabilities: web search,
 code execution, headless browser control, persistent shell state, session memory, parallel tool
-execution, and visible reasoning via a `think` tool.
+execution, visible reasoning via a `think` tool, persistent long-term memory, query intent
+clarification, result self-evaluation, confidence signalling, graceful tool degradation, and
+structured output formatting.
 
 ## Why OpenAI SDK instead of Anthropic SDK
 
@@ -25,8 +27,11 @@ terminal-agent/
   providers.py           — provider configs (Ollama, OpenRouter, HuggingFace, Anthropic)
   system_prompt.py       — Viper persona + tool usage guidance + trust model instructions
   requirements.txt       — openai, rich, ddgs, playwright, python-dotenv, cryptography
+  skills/
+    <name>/SKILL.md      — task playbooks loaded on demand (see Skills section)
   tools/
     __init__.py          — assembles TOOL_DEFINITIONS + execute_tool (only import point for agent.py)
+    skills.py            — skill discovery, system-prompt index, use_skill tool
     state.py             — shared working directory state (get_cwd / set_cwd)
     guardrails.py        — ALL security primitives (see Security section below)
     think.py             — think tool + verbose toggle
@@ -37,6 +42,7 @@ terminal-agent/
     python_runner.py     — run_python (uses shared cwd)
     browser.py           — browser (Playwright, headless by default, visible on demand)
     http.py              — http_fetch
+    memory.py            — save_memory, list_memories, delete_memory, search_memory (persists to ~/.viper/memory.json)
 ```
 
 Each tool file owns its implementation **and** its OpenAI tool definition (`DEFINITIONS` list).
@@ -248,6 +254,32 @@ on exit / Ctrl+C:
 
 ---
 
+## Skills
+
+**What:** a skill is a folder `skills/<name>/SKILL.md` with `name` and `description` frontmatter and a
+playbook body. Bundled skills: `github-issue-fix`, `web-research`, `data-analysis`, `code-review`,
+`project-scaffold`, `debugging`. Personal skills go in `~/.viper/skills/<name>/SKILL.md` and override a
+bundled skill of the same name.  
+**Why:** task-specific guidance (GitHub workflow, browser flow, analysis method) used to sit in
+`SYSTEM_PROMPT` and cost tokens on every turn. Now the prompt carries a one-line-per-skill index
+(`system_prompt.build_system_prompt()`), and the full text loads only when needed.  
+**Who picks the skill:** the main model, from the index, by calling `use_skill(name)`. There is no
+separate router LLM and the bodies are never sent up front. `/skills` lists them and `/skill <name>`
+loads one by hand. A resumed session gets its system message refreshed with the current index.  
+**What stays in `SYSTEM_PROMPT`:** the trust model, sandbox rules, `.env` rules and attachment rules.
+They must hold on every turn, and skills are told they never override them.  
+**Guards:** names are looked up only among discovered skills (no path built from model input); a skill
+is capped at 7,500 chars so it is not cut by the 8k tool-result limit; skills load only from the repo
+`skills/` folder and `~/.viper/skills/`, never from the working directory (a cloned repo could ship a
+malicious one); `write_file`/`edit_file` refuse to touch either folder so an injected model cannot plant
+a trusted playbook; `use_skill` output still goes through the PII and injection scan.  
+**Limit:** the write block covers the file tools only. `run_shell`/`run_python` could still write there
+(same heuristic-not-sandbox limit as #11).  
+**Adding one:** create `skills/<kebab-name>/SKILL.md`. `tests/test_skills.py` checks every bundled skill
+for frontmatter, size, and the injection scan.
+
+---
+
 ## Providers
 
 | Name | base_url | Auth | Default model |
@@ -274,11 +306,17 @@ python agent.py --list-providers
 
 ---
 
-## Tools (11 total)
+## Tools (15 total)
 
 ### `think`
 Model calls this to reason before acting. Displays the thought as a violet `◆ │` block in the
 terminal. Toggled with `/think`. Listed first in `TOOL_DEFINITIONS` so models see it first.
+
+### `save_memory` / `list_memories` / `delete_memory` / `search_memory`
+Persistent key-value memory stored at `~/.viper/memory.json`. Memories inject into the system
+prompt via `load_memory_context()` on every session start. Saving/deleting a memory refreshes
+the live system prompt in the same session. `/memory` slash command for manual management.
+Not tagged as untrusted (user controls what gets saved).
 
 ### `browser`
 Controls Chromium via Playwright. Headless by default; switches to visible on CAPTCHA/2FA/bot-
@@ -301,6 +339,10 @@ DuckDuckGo via `ddgs`. Free, no API key. Output is tagged as untrusted and scann
 ### `http_fetch`
 Lightweight HTTP via stdlib `urllib`. **URL guard fires here**: `check_url()` is called before
 the request is sent.
+
+### `use_skill`
+Loads a skill playbook by name (see Skills section). Not tagged untrusted (first-party files), but
+still scanned for PII and injection.
 
 ### `calculate`
 Safe AST-based math eval. No exec/eval risk. Skipped by injection scan and tagging.
@@ -369,9 +411,14 @@ Think calls always run first (serially) so reasoning informs parallel actions.
 | `/clear` | Wipe conversation history |
 | `/model <name>` | Switch model mid-session |
 | `/tools` | List all available tools |
+| `/skills` | List available skills |
+| `/skill <name>` | Load a skill into the conversation by hand |
 | `/save [file]` | Save session to JSON |
 | `/cwd [path]` | Show or change working directory |
 | `/tokens` | Show context size (tokens, chars, messages, % of limit) |
+| `/memory` | List saved memories |
+| `/memory forget <key>` | Delete one memory |
+| `/memory clear` | Wipe all memories |
 | `/help` | Show all commands |
 
 ---
@@ -460,7 +507,6 @@ sandboxed call — defense in depth matters even with isolation.
 
 - True local sandboxing (Docker/seccomp) — E2B covers the cloud case; local-only deployments
   without E2B still execute run_shell/run_python on the host
-- Multi-agent support — spawning parallel subagents for independent subtasks
 - Streaming output for long-running shell commands (currently shows result only on completion)
 - Native token counting (currently uses chars/4 approximation; provider usage field varies)
 - Google Drive / GitHub / Slack tools (need OAuth2 or PAT)
@@ -470,3 +516,37 @@ sandboxed call — defense in depth matters even with isolation.
   mocked-LLM test of `chat()`, `http_fetch`/`browser`/`github`/`sandbox`, and real-model evals.
   Known defects are pinned as strict `xfail` tests (see `TestKnownBugs` / `TestKnownGaps`)
 - Write confirmation prompt for `write_file` / `edit_file` on existing files
+- Semantic/vector memory — current memory is key-value (simple but not retrieved by relevance);
+  upgrading to ChromaDB + sentence-transformers would enable recall by similarity instead of keyword
+- RAG for document Q&A — no chunking/embedding pipeline; large PDFs are loaded whole into context
+
+## Agent intelligence features (added)
+
+### Query understanding
+Before acting on complex/ambiguous requests, the model calls `think` to restate the real intent,
+pick the right tool sequence, and surface assumptions — reducing wasted tool calls.
+
+### Result self-evaluation
+After every tool result, the model evaluates whether the result answered the question before
+responding. Incomplete results trigger a retry or fallback rather than a partial answer.
+
+### Persistent long-term memory (`tools/memory.py`)
+Four tools: `save_memory`, `list_memories`, `delete_memory`, `search_memory`. Facts stored at
+`~/.viper/memory.json` (plain JSON — user chose the content). Injected into the system prompt via
+`build_system_prompt()` on every session start. A `/memory` slash command exposes management to the user.
+System prompt auto-refreshes after every `save_memory` / `delete_memory` so new facts are live
+in the same session without a restart.
+
+### Confidence signalling
+System prompt instructs the model to explicitly label the source of every claim: tool result
+(certain), training data (may be outdated), or inference (explicitly flagged as a guess).
+
+### Graceful degradation
+System prompt provides a fallback table: `web_search` fails → `http_fetch` → `browser`;
+`read_file` blocked → explain why; shell command not found → suggest install; API 4xx → fix args,
+5xx → retry once. Model reports what it tried when all fallbacks are exhausted.
+
+### Structured output
+System prompt defines output schemas for code review (`[SEVERITY] file:line — description`),
+data analysis (summary → bullets → table), comparisons (markdown table), and checklists
+(`- [x]` / `- [ ]`). Plain prose for all other responses.

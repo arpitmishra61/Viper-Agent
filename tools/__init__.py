@@ -8,6 +8,8 @@ import tools.http as _http
 import tools.think as _think
 import tools.multiagent as _multiagent
 import tools.github as _github
+import tools.skills as _skills
+import tools.memory as _memory
 
 web_search = _search.web_search
 calculate = _calculator.calculate
@@ -23,7 +25,9 @@ think = _think.think
 
 TOOL_DEFINITIONS = (
     _think.DEFINITIONS         # think first — model sees it first in the list
-    + _multiagent.DEFINITIONS  # spawn_agents second — high-level capability
+    + _memory.DEFINITIONS      # memory — persistent facts across sessions
+    + _skills.DEFINITIONS      # use_skill — load task playbooks listed in the system prompt
+    + _multiagent.DEFINITIONS  # spawn_agents — high-level capability
     + _search.DEFINITIONS
     + _calculator.DEFINITIONS
     + _files.DEFINITIONS
@@ -83,6 +87,16 @@ def execute_tool(name: str, args: dict) -> str:
         )
     if name == "think":
         return think(args.get("thought", ""))
+    if name == "use_skill":
+        return _skills.use_skill(args.get("name", ""))
+    if name == "save_memory":
+        return _memory.save_memory(args.get("key", ""), args.get("value", ""))
+    if name == "list_memories":
+        return _memory.list_memories()
+    if name == "delete_memory":
+        return _memory.delete_memory(args.get("key", ""))
+    if name == "search_memory":
+        return _memory.search_memory(args.get("query", ""))
     if name == "spawn_agents":
         return _multiagent.spawn_agents(args.get("request", ""))
     # ── GitHub tools ───────────────────────────────────────────────────────────

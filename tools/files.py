@@ -1,8 +1,10 @@
 from pathlib import Path
 
 from tools.guardrails import check_path, is_env_file, mask_env, take_env_grant
+from tools.skills import is_skill_path
 
 _MAX_READ_BYTES = 50 * 1024  # 50 KB
+_SKILL_WRITE_BLOCKED = "Blocked: skill files are instructions the agent trusts, so the agent cannot modify them."
 
 
 def read_file(path: str) -> str:
@@ -41,6 +43,8 @@ def write_file(path: str, content: str, mode: str = "overwrite") -> str:
     blocked = check_path(path)
     if blocked:
         return blocked
+    if is_skill_path(path):
+        return _SKILL_WRITE_BLOCKED
     try:
         p = Path(path).expanduser().resolve()
         p.parent.mkdir(parents=True, exist_ok=True)
@@ -57,6 +61,8 @@ def edit_file(path: str, old_string: str, new_string: str) -> str:
     blocked = check_path(path)
     if blocked:
         return blocked
+    if is_skill_path(path):
+        return _SKILL_WRITE_BLOCKED
     try:
         p = Path(path).expanduser().resolve()
         if not p.exists():

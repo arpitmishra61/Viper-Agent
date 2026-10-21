@@ -29,7 +29,7 @@ from typing import Callable
 from rich.console import Console
 
 import agent
-from system_prompt import SYSTEM_PROMPT
+from system_prompt import build_system_prompt
 from tools import TOOL_DEFINITIONS
 from tools.state import get_cwd, set_cwd
 
@@ -232,7 +232,7 @@ def run_task(
         r.user_content = agent._prepare_message(task.prompt, {"pii_suppressed": set()})
 
         messages: list[dict] = [
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": build_system_prompt()},
             {"role": "user", "content": r.user_content},
         ]
         t0 = time.time()

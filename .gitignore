@@ -48,3 +48,7 @@ tmp*.py
 #PDF
 *.pdf
 evals/results/
+
+#img
+*.jpg
+*.jpeg
