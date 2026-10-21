@@ -518,6 +518,64 @@ sandboxed call — defense in depth matters even with isolation.
 - Semantic/vector memory — current memory is key-value (simple but not retrieved by relevance);
   upgrading to ChromaDB + sentence-transformers would enable recall by similarity instead of keyword
 - RAG for document Q&A — no chunking/embedding pipeline; large PDFs are loaded whole into context
+- Real query rewriting — see design below
+- LLM-as-judge result evaluation — see design below
+
+### Planned: Real Query Rewriting
+
+Current state: system prompt instructs the model to use `think` to restate intent before searching.
+This is guidance, not enforcement — the model can skip it and nothing catches it.
+
+**Proper implementation:**
+
+1. **Intercept** in `_run_tools()` before executing any `web_search` or `http_fetch` call.
+   Trigger only when the query is vague (< 6 words, or contains pronouns like "this", "it", "that").
+
+2. **Rewrite call** — second API call (non-streaming, no tools, cheap model) with:
+   ```
+   "Rewrite this search query into 2-3 specific, self-contained queries: '{original}'"
+   ```
+   Returns a list of better-formed queries.
+
+3. **Fan out** — run all rewritten queries in parallel via the existing `ThreadPoolExecutor`.
+   Collect all results.
+
+4. **Merge** — combine into one tool result block. Model now has 3x the retrieval signal from
+   one user query.
+
+**Cost:** 1 extra API call per search. Use a small/cheap model (e.g. `gpt-4o-mini`) for the
+rewrite step — it doesn't need reasoning capability, just reformulation.
+
+### Planned: LLM-as-Judge Result Evaluation
+
+Current state: system prompt instructs the model to evaluate tool results before responding.
+This is a suggestion — the model may ignore it, especially on long context.
+
+**Proper implementation:**
+
+1. **Capture result** after `execute_tool` returns, before appending to messages.
+
+2. **Score call** — second API call (small judge model, no tools) with:
+   ```
+   "Query: {original_user_message}
+   Tool result: {result}
+   Is this result relevant and complete? Score 1-5. Reply with just the number."
+   ```
+
+3. **Threshold check:**
+   - Score ≥ 3 → pass result through normally
+   - Score < 3 → discard result, retry tool with a rewritten query (max 2 retries)
+
+4. **Graceful failure** — after 2 failed retries, pass the best result seen with a
+   `[low confidence — best result found after N attempts]` prefix so the model knows the
+   quality signal.
+
+**Scope:** Apply only to `web_search` and `http_fetch` results — the tools most likely to
+return irrelevant content. Skip for `run_shell` / `run_python` (deterministic, no relevance
+question) and `read_file` (user pointed at it explicitly).
+
+**Cost:** 1 extra API call per web/http result. Use a dedicated `judge_client` in `providers.py`
+pointing to the cheapest available model — evaluation is cheap, main-agent generation is expensive.
 
 ### Guardrail gap closed: run_python .env access (tools/guardrails.py)
 
