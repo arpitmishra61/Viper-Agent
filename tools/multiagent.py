@@ -37,6 +37,8 @@ def spawn_agents(request: str) -> str:
         retry = f"  [dim](retried {result.attempts - 1}x)[/dim]" if result.attempts > 1 else ""
         color = "#39ff14" if result.success else "#ef4444"
         console.print(f"  {icon}  [bold {color}]{result.role}[/bold {color}]  [dim]{result.task_id} done[/dim]{retry}")
+        if not result.success and result.error:
+            console.print(f"       [dim red]error: {result.error}[/dim red]")
 
     orch = OrchestratorAgent(_client, _model)
     return orch.execute(request, on_plan=_on_plan, on_result=_on_result)

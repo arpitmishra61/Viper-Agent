@@ -10,21 +10,6 @@ from typing import Any, Callable
 from tools import TOOL_DEFINITIONS, execute_tool
 
 
-# ── model roster ───────────────────────────────────────────────────────────────
-# All OpenRouter models. LLM picks the best one per task during planning.
-MODEL_ROSTER: dict[str, str] = {
-    "mistralai/mistral-7b-instruct:free":           "summarization, rewriting, translation, light reasoning",
-    "meta-llama/llama-3.1-8b-instruct:free":        "classification, tagging, entity extraction, short Q&A",
-    "google/gemma-2-9b-it:free":                    "sentiment analysis, simple classification, chat",
-    "deepseek/deepseek-r1-distill-llama-70b:free":  "math, step-by-step reasoning, logic problems",
-    "meta-llama/llama-3.3-70b-instruct:free":       "complex analysis, long-form writing, planning",
-    "deepseek/deepseek-chat:free":                  "code generation, debugging, technical explanation",
-    "anthropic/claude-3.5-haiku":                   "fast general tasks, structured output, tool use",
-    "anthropic/claude-3.5-sonnet":                  "hard reasoning, research synthesis, creative writing",
-    "openai/gpt-4o-mini":                           "general purpose, fast, cost-effective",
-    "openai/gpt-4o":                                "complex reasoning, vision, high-stakes decisions",
-    "perplexity/llama-3.1-sonar-large-128k-online": "real-time web search, up-to-date facts",
-}
 
 
 # ── shared state ───────────────────────────────────────────────────────────────
@@ -182,29 +167,21 @@ class OrchestratorAgent:
 
     # ── planning ───────────────────────────────────────────────────────────────
     def plan(self, user_request: str) -> list[AgentTask]:
-        """Ask the LLM to decompose the request into 2–5 parallel subtasks.
-        The LLM also picks the best model for each task from MODEL_ROSTER."""
-        roster_lines = "\n".join(
-            f'  "{mid}" — {desc}' for mid, desc in MODEL_ROSTER.items()
-        )
+        """Ask the LLM to decompose the request into 2–5 parallel subtasks."""
         prompt = f"""You are an orchestrator. Decompose the request into 2-5 independent subtasks that can run in parallel.
 
 User request: {user_request}
-
-Available models (all on OpenRouter). Pick the best one for each task:
-{roster_lines}
 
 Respond with a JSON array ONLY (no prose). Each element:
   "id"          – short unique id like "t1", "t2"
   "role"        – agent role (e.g. "researcher", "code_writer", "critic", "data_analyst")
   "goal"        – self-contained instruction for this agent; include all context it needs
   "needs_tools" – true if the agent needs web/file/shell tools; false for pure reasoning
-  "model"       – exact model id from the list above that best fits this task
 
 Example:
 [
-  {{"id":"t1","role":"researcher","goal":"Search for X and summarize key findings","needs_tools":true,"model":"perplexity/llama-3.1-sonar-large-128k-online"}},
-  {{"id":"t2","role":"summarizer","goal":"Condense the findings into 3 bullet points","needs_tools":false,"model":"mistralai/mistral-7b-instruct:free"}}
+  {{"id":"t1","role":"researcher","goal":"Search for X and summarize key findings","needs_tools":true}},
+  {{"id":"t2","role":"summarizer","goal":"Condense the findings into 3 bullet points","needs_tools":false}}
 ]"""
 
         resp = self.client.chat.completions.create(
@@ -224,16 +201,13 @@ Example:
         tasks = []
         for p in plans:
             tool_defs = TOOL_DEFINITIONS if p.get("needs_tools", True) else []
-            # Use LLM-chosen model if valid, otherwise fall back to worker_model
-            chosen = p.get("model", "")
-            model  = chosen if chosen in MODEL_ROSTER else self.worker_model
             tasks.append(AgentTask(
                 id=p["id"],
                 role=p["role"],
                 goal=p["goal"],
                 context={"original_request": user_request},
                 tools=tool_defs,
-                model=model,
+                model=self.worker_model,
             ))
         return tasks
 
