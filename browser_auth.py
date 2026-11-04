@@ -5,6 +5,11 @@ the user signs in, the page submits the session to http://127.0.0.1:<port>/callb
 checks the state (and the Origin, when the browser sends one), verifies the token with Supabase,
 stores the session and shuts down.
 
+The page sets its referrer policy to origin-when-cross-origin on purpose. With the default
+strict-origin-when-cross-origin, browsers send "Origin: null" on a POST from https to http://127.0.0.1
+(downgrade protection), and the origin check below would refuse every sign-in. A browser or extension
+that still sends "null" is refused too; the fix is on the page side, not here.
+
 There is no PKCE here: PKCE protects an authorization code that is exchanged later, and this
 handoff delivers the session directly. The state blocks forged callbacks and the token check
 blocks anything Supabase did not issue.

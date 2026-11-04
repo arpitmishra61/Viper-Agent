@@ -73,7 +73,8 @@ def cmd_logout() -> None:
         console.print("  [dim]not logged in[/dim]\n")
         return
     if questionary.confirm(
-        f"Sign out {p['email']}? Saved API keys on this machine will be removed.", default=False
+        f"Sign out {p['email']}? Your saved API keys stay in your account and return when you sign in.",
+        default=False
     ).ask():
         auth.logout()
         console.print("  [dim]logged out[/dim]\n")
@@ -123,7 +124,8 @@ def validate_key(provider: str, key: str) -> bool | None:
     return r.status_code == 200
 
 
-def _ask_key(provider: str, env_name: str) -> str | None:
+def ask_key(provider: str, env_name: str) -> str | None:
+    """Prompt for a key, check it, save it to the account. None if the user gave up."""
     for _ in range(3):
         key = questionary.password(f"Paste your {provider} API key ({env_name}):").ask()
         if not key:
@@ -137,20 +139,40 @@ def _ask_key(provider: str, env_name: str) -> str | None:
             "Could not verify the key (offline?). Use it anyway?", default=True
         ).ask():
             continue
-        auth.save_key(env_name, key)
+        _store_key(env_name, key)
         return key
     return None
 
 
+def _store_key(env_name: str, key: str) -> None:
+    """Save a key to the account and say plainly where it ended up."""
+    try:
+        auth.save_key(env_name, key)
+    except auth.AuthError as e:
+        console.print(f"  [yellow]{e}[/yellow]\n  [dim]the key works for this session but was not saved[/dim]")
+        return
+    if auth.keys_persist():
+        console.print("  [dim]key saved to your Viper account[/dim]")
+    else:
+        console.print("  [dim]key kept for this session only. sign in (viper login) to save keys to your account[/dim]")
+
+
 def _provider_step(provider_arg: str | None, model_arg: str | None, key_arg: str | None) -> Start | None:
     profile = auth.load_profile()
-    saved = profile.get("keys", {})
+    try:
+        moved = auth.migrate_local_keys()
+        if moved:
+            console.print(f"  [dim]moved {moved} saved key(s) from this computer to your account[/dim]")
+        saved = auth.saved_key_names()
+    except auth.AuthError as e:
+        console.print(f"  [yellow]{e}[/yellow]")
+        saved = set()
 
     def key_source(cfg: dict) -> str | None:
         env = cfg.get("api_key_env")
         if env and os.environ.get(env):
             return "key from environment"
-        if env and saved.get(env):
+        if env and env in saved:
             return "key saved"
         return None
 
@@ -175,12 +197,17 @@ def _provider_step(provider_arg: str | None, model_arg: str | None, key_arg: str
     env = cfg.get("api_key_env")
     key = key_arg
     if env and not key:
-        key = os.environ.get(env) or saved.get(env)
+        key = os.environ.get(env)
+        if not key and env in saved:
+            try:
+                key = auth.get_saved_key(env)
+            except auth.AuthError as e:
+                console.print(f"  [yellow]{e}[/yellow]")
         if not key:
             if not sys.stdin.isatty():
                 console.print(f"  [red]no API key found. Set {env} or run viper interactively.[/red]\n")
                 return None
-            key = _ask_key(provider, env)
+            key = ask_key(provider, env)
             if not key:
                 return None
 
@@ -200,4 +227,41 @@ def startup(provider_arg: str | None, model_arg: str | None, key_arg: str | None
     start = _provider_step(provider_arg, model_arg, key_arg)
     if start is not None:
         start.identity = identity
+        if identity not in ("", "guest"):
+            _e2b_step()
     return start
+
+
+_E2B_BLURB = """
+  [bold]Optional: add your own E2B sandbox key[/bold]
+  E2B gives Viper a throwaway cloud machine, so code and shell commands run there instead of on your computer.
+  [dim]Use it for:[/dim]
+    - installing packages (pip / npm) without touching your system
+    - cloning and running code you don't trust
+    - building and testing a fix end to end, safely
+  Your account already includes 3 free sandbox sessions. A key of your own (https://e2b.dev) removes that limit.
+  [dim]Skip it if you don't need a sandbox. You can add it any time with /e2b <key>.[/dim]
+"""
+
+
+def _e2b_step() -> None:
+    """After sign-in, offer once to save the user's own E2B key. Never blocks startup."""
+    if not sys.stdin.isatty() or os.environ.get("E2B_API_KEY") or auth.e2b_prompt_done():
+        return
+    try:
+        if "E2B_API_KEY" in auth.saved_key_names():
+            return
+    except auth.AuthError:
+        return   # offline: ask next time instead of nagging now
+    console.print(_E2B_BLURB)
+    if not questionary.confirm("Add your own E2B key now?", default=False).ask():
+        auth.mark_e2b_prompt_done()
+        console.print("  [dim]skipped. you can still use the 3 free sandbox sessions, or run /e2b <key> later.[/dim]\n")
+        return
+    key = questionary.password("Paste your E2B API key:").ask()
+    auth.mark_e2b_prompt_done()
+    if not key or not key.strip():
+        console.print("  [dim]nothing saved[/dim]\n")
+        return
+    _store_key("E2B_API_KEY", key.strip())
+    console.print()

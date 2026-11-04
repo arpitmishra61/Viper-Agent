@@ -5,8 +5,9 @@ Everything here fits the free tiers. No email server is needed, because Google s
 
 ## 1. Database and secrets
 
-1. SQL editor: run `migrations/0001_init.sql`.
+1. SQL editor: run `migrations/0001_init.sql`, then `migrations/0002_user_keys.sql` (per-user saved API keys).
 2. Table Editor > `app_secrets` > Insert row: `name = E2B_API_KEY`, `value = <your E2B key>`.
+   (Only needed for the free shared sandbox. Users' own keys never go in this table.)
 
 ## 2. Turn on Google sign-in
 
@@ -46,6 +47,10 @@ static host, because it calls Supabase from the browser.
 2. Fill in `supabaseUrl` and `supabaseAnonKey` (Project Settings > API). The anon or publishable key is public
    by design. Never use the `service_role` or `sb_secret_` key.
 
+Keep `<meta name="referrer" content="origin-when-cross-origin">` in `index.html`. With the browser default
+(`strict-origin-when-cross-origin`), Chrome sends `Origin: null` on the https to `http://127.0.0.1` handoff, and
+the CLI refuses it with "Request refused". After changing the page, redeploy it to Vercel.
+
 ## 5. Point the CLI at it
 
 | Variable | Value |
@@ -68,6 +73,30 @@ npx supabase link --project-ref YOUR-REF
 npx supabase functions deploy sandbox-grant
 ```
 
+## 7. Saved API keys (`user-keys`)
+
+Signed-in users' OpenRouter, Hugging Face and E2B keys are saved in the `user_keys` table, not on their computer.
+Only the local profile (email, session tokens, last provider and model) stays on disk. Guests (not signed in)
+keep keys for the current run only.
+
+1. Create the encryption secret (PowerShell) and store it as a function secret:
+   ```
+   $b = New-Object byte[] 32; [Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($b)
+   npx supabase secrets set KEYS_ENCRYPTION_SECRET=$([Convert]::ToBase64String($b))
+   ```
+2. Deploy: `npx supabase functions deploy user-keys`
+
+How it is protected:
+- The table has RLS on with no policies and no grants for `anon` or `authenticated`. Clients can only reach it
+  through the function, which checks the user's token and only touches that user's rows.
+- Values are encrypted with AES-256-GCM using `KEYS_ENCRYPTION_SECRET`, with the user id and key name bound in,
+  so a database dump or the table editor shows only ciphertext.
+- Keys saved on disk by older versions are moved into the account on the next sign-in.
+
+Know the trade-off: the function holds the decryption secret, so anyone who can read your function secrets and the
+table (you, as the project owner) can decrypt users' keys. Back the secret up. If it is lost or changed, stored keys
+become unreadable and users paste them again.
+
 ## How sign-in works
 
 1. `viper` shows **Sign in with Google / Continue free / Quit**. The CLI starts a one-shot server on
@@ -79,6 +108,8 @@ npx supabase functions deploy sandbox-grant
    Then it stores the session and shuts the server down.
 4. The browser shows "You're signed in". The CLI prints "Authenticated as ..." and continues to the provider menu.
    Tokens refresh automatically.
+5. After the provider step, a signed-in user with no E2B key is asked once whether to add their own (optional; the
+   prompt explains what the sandbox is for). Answering no, or skipping, is remembered. `/e2b <key>` works any time.
 
 If the CLI is not waiting any more (it times out after 5 minutes), run `viper login` again.
 There is no PKCE step: PKCE protects an authorization code that is exchanged later, and this handoff

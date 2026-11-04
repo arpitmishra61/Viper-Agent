@@ -25,6 +25,9 @@ terminal-agent/
                            all security vetting (rate limiter, shell/python pre-checks,
                            PII warnings, injection detection, external-content tagging)
   providers.py           — provider configs (Ollama, OpenRouter, HuggingFace, Anthropic)
+  pickers.py             — interactive menus for /sessions, /model-select, /apikey (UI only; agent.py owns
+                           the chat state and applies the result). New top-level modules must also be added
+                           to `py-modules` in pyproject.toml or the installed `viper` fails to import
   system_prompt.py       — Viper persona + tool usage guidance + trust model instructions
   requirements.txt       — openai, rich, ddgs, playwright, python-dotenv, cryptography
   skills/
@@ -409,7 +412,10 @@ Think calls always run first (serially) so reasoning informs parallel actions.
 |---|---|
 | `/think` | Toggle verbose thinking display on/off |
 | `/clear` | Wipe conversation history |
-| `/model <name>` | Switch model mid-session |
+| `/sessions` | Menu of saved sessions (type to filter); loads the pick, saving the current chat first |
+| `/model-select` | Menu: provider, then model (curated list; OpenRouter/Anthropic can search the live OpenRouter list; Ollama lists installed models). Switching provider fetches its key (env, then account, then asks) and rebuilds the client |
+| `/model <name>` | Switch model by name on the current provider |
+| `/apikey` (also `/api`, `/api-key`, `/keys`) | Menu: provider (OpenRouter/Anthropic share one slot, plus Hugging Face and E2B), then add / replace / remove its key. A change to the active provider's key rebuilds the client at once |
 | `/tools` | List all available tools |
 | `/skills` | List available skills |
 | `/skill <name>` | Load a skill into the conversation by hand |

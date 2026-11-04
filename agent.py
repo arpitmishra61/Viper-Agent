@@ -27,6 +27,7 @@ from rich.text import Text
 
 import auth
 import onboarding
+import pickers
 from auth import get_or_create_key as _get_or_create_key
 from providers import PROVIDERS, get_client
 from system_prompt import build_system_prompt
@@ -196,6 +197,86 @@ def _load_last_session() -> dict | None:
     if plain:
         return json.loads(plain[-1].read_text(encoding="utf-8"))
     return None
+
+
+def _read_session_file(path: Path) -> dict | None:
+    """One saved session, or None if it cannot be read (wrong key, damaged file, no cryptography)."""
+    try:
+        raw = path.read_bytes()
+        if path.suffix == ".viper":
+            if not _CRYPTO_OK:
+                return None
+            raw = _Fernet(_get_or_create_key()).decrypt(raw)
+        data = json.loads(raw.decode())
+        return data if isinstance(data, dict) else None
+    except Exception:
+        return None
+
+
+def _session_time(stem: str) -> str:
+    try:
+        return time.strftime("%Y-%m-%d %H:%M", time.strptime(stem[:15], "%Y%m%d_%H%M%S"))
+    except ValueError:
+        return stem
+
+
+def _list_sessions(limit: int = 30) -> list[dict]:
+    """Saved sessions, newest first: path, when, provider, model, message count, first-question preview."""
+    if not _SESSIONS_DIR.exists():
+        return []
+    files = sorted(
+        [*_SESSIONS_DIR.glob("*.viper"), *_SESSIONS_DIR.glob("*.json")],
+        key=lambda p: p.stem, reverse=True,
+    )
+    out: list[dict] = []
+    for path in files:
+        if len(out) >= limit:
+            break
+        data = _read_session_file(path)
+        msgs = (data or {}).get("messages") or []
+        convo = [m for m in msgs if m.get("role") in ("user", "assistant")]
+        if not convo:
+            continue   # unreadable, or nothing was said in it
+        first = next(
+            (str(m.get("content") or "") for m in convo
+             if m["role"] == "user" and not str(m.get("content") or "").startswith("[/")),
+            "",
+        )
+        out.append({
+            "path": path,
+            "when": _session_time(path.stem),
+            "provider": data.get("provider"),
+            "model": data.get("model"),
+            "count": len(convo),
+            "preview": " ".join(first.split())[:70],
+        })
+    return out
+
+
+def _load_into_state(state: dict, session: dict) -> bool:
+    """Replace the current chat with a saved session. The chat you are leaving is saved first."""
+    data = _read_session_file(session["path"])
+    if data is None:
+        console.print(f"  [bold {_RED}]could not read that session (damaged, or saved with another key)[/bold {_RED}]\n")
+        return False
+    if any(m.get("role") != "system" for m in state["messages"]):
+        left = _save_session(state["messages"], state["provider"], state["model"])
+        console.print(f"  [dim]current chat saved → {left}[/dim]")
+    system_msg = {"role": "system", "content": build_system_prompt()}
+    messages = data.get("messages") or [system_msg]
+    if messages[0].get("role") == "system":
+        messages[0] = system_msg     # a saved session carries the old prompt
+    else:
+        messages.insert(0, system_msg)
+    state["messages"] = messages
+    console.print(f"  [dim]loaded {session['when']} · {session['count']} messages[/dim]")
+    if (data.get("provider"), data.get("model")) != (state["provider"], state["model"]):
+        console.print(
+            f"  [dim]it was started with {data.get('provider')} · {data.get('model')}. "
+            f"still using {state['provider']} · {state['model']} (change with /model-select)[/dim]"
+        )
+    console.print()
+    return True
 
 
 # ── rendering ─────────────────────────────────────────────────────────────────
@@ -713,7 +794,10 @@ def _run_multi_agent(request: str, state: dict) -> None:
 # ── slash commands ────────────────────────────────────────────────────────────
 _HELP_TEXT = (
     f"  [bold {_GREEN}]/clear[/bold {_GREEN}]          wipe conversation history\n"
-    f"  [bold {_GREEN}]/model[/bold {_GREEN}] [dim]<name>[/dim]    switch model mid-session\n"
+    f"  [bold {_GREEN}]/sessions[/bold {_GREEN}]       pick a saved session and load it\n"
+    f"  [bold {_GREEN}]/model-select[/bold {_GREEN}]   pick a provider, then a model from its list\n"
+    f"  [bold {_GREEN}]/model[/bold {_GREEN}] [dim]<name>[/dim]    switch model by name on the current provider\n"
+    f"  [bold {_GREEN}]/apikey[/bold {_GREEN}]         pick a provider, then add, replace or remove its key\n"
     f"  [bold {_GREEN}]/tools[/bold {_GREEN}]          list available tools\n"
     f"  [bold {_GREEN}]/skills[/bold {_GREEN}]         list skills  ·  [bold {_GREEN}]/skill[/bold {_GREEN}] [dim]<name>[/dim] load one into this chat\n"
     f"  [bold {_GREEN}]/save[/bold {_GREEN}]  [dim][file][/dim]    save session to JSON\n"
@@ -730,6 +814,30 @@ _HELP_TEXT = (
 )
 
 
+def _set_model(state: dict, model: str) -> None:
+    """Change the model on the current provider."""
+    from tools.multiagent import init as _init_multiagent
+    state["model"] = model
+    _init_multiagent(state["client"], model)
+    auth.remember_choice(state["provider"], model)
+
+
+def _switch_provider(state: dict, provider: str, model: str, api_key: str | None) -> None:
+    """Build a client for another provider (or the same one with a new key). Raises ValueError if it can't."""
+    from tools.multiagent import init as _init_multiagent
+    client, _cfg = get_client(provider, api_key)
+    state.update(client=client, provider=provider, model=model)
+    _init_multiagent(client, model)
+    auth.remember_choice(provider, model)
+
+
+def _need_terminal(what: str) -> bool:
+    if pickers.interactive():
+        return True
+    console.print(f"  [dim]{what} needs an interactive terminal[/dim]\n")
+    return False
+
+
 def _handle_slash(raw: str, state: dict) -> None:
     parts = raw.strip().split(None, 1)
     name = parts[0].lower()
@@ -741,10 +849,62 @@ def _handle_slash(raw: str, state: dict) -> None:
 
     elif name == "/model":
         if not arg:
-            console.print(f"  [dim]current model: {state['model']}[/dim]\n")
+            console.print(f"  [dim]current model: {state['provider']} · {state['model']}  (/model-select to pick another)[/dim]\n")
         else:
-            state["model"] = arg
-            console.print(f"  [dim]model → {arg}[/dim]\n")
+            _set_model(state, arg)
+            console.print(f"  [dim]model → {_escape(arg)}[/dim]\n")
+
+    elif name in ("/model-select", "/models"):
+        if _need_terminal("/model-select"):
+            picked = pickers.pick_provider_model(state["provider"], state["model"])
+            if picked is None:
+                console.print("  [dim]no change[/dim]\n")
+            else:
+                provider, model = picked
+                if provider == state["provider"]:
+                    _set_model(state, model)
+                else:
+                    ok, key = pickers.resolve_key(provider)
+                    if not ok:
+                        console.print(f"  [dim]no key for {provider}, staying on {state['provider']}[/dim]\n")
+                        return
+                    try:
+                        _switch_provider(state, provider, model, key)
+                    except ValueError as e:
+                        console.print(f"  [bold {_RED}]{_escape(str(e))}[/bold {_RED}]\n")
+                        return
+                console.print(f"  [dim]now using {state['provider']} · {_escape(state['model'])}[/dim]\n")
+
+    elif name in ("/apikey", "/api-key", "/keys", "/api"):
+        if _need_terminal("/apikey"):
+            active_env = PROVIDERS[state["provider"]].get("api_key_env")
+
+            def _changed(env: str, value: str | None) -> None:
+                if env != active_env:
+                    return
+                if value is None:
+                    console.print(f"  [dim]this chat keeps the key already loaded; it will not be there next start[/dim]")
+                    return
+                try:
+                    _switch_provider(state, state["provider"], state["model"], value)
+                    console.print(f"  [dim]now using the new {state['provider']} key[/dim]")
+                except ValueError as e:
+                    console.print(f"  [bold {_RED}]{_escape(str(e))}[/bold {_RED}]")
+
+            pickers.manage_keys(_changed)
+            console.print()
+
+    elif name == "/sessions":
+        if _need_terminal("/sessions"):
+            sessions = _list_sessions()
+            if not sessions:
+                console.print("  [dim]no saved sessions yet. a chat is saved when you exit or run /save[/dim]\n")
+            else:
+                chosen = pickers.pick_session(sessions)
+                if chosen is None:
+                    console.print("  [dim]no change[/dim]\n")
+                else:
+                    _load_into_state(state, chosen)
 
     elif name == "/tools":
         console.print(f"\n  [dim]tools ({len(TOOL_DEFINITIONS)}):[/dim]")
@@ -922,8 +1082,13 @@ def _handle_slash(raw: str, state: dict) -> None:
         if not arg:
             console.print(f"  [dim]usage: /e2b <your E2B API key>  (get one at https://e2b.dev)[/dim]\n")
         else:
-            auth.save_key("E2B_API_KEY", arg)
-            console.print(f"  [dim]E2B key saved; sandbox calls now use it[/dim]\n")
+            try:
+                auth.save_key("E2B_API_KEY", arg.strip())
+            except auth.AuthError as e:
+                console.print(f"  [yellow]{_escape(str(e))}[/yellow]  [dim]using the E2B key for this session only[/dim]\n")
+            else:
+                where = "saved to your account" if auth.keys_persist() else "kept for this session only (viper login to save it)"
+                console.print(f"  [dim]E2B key {where}; sandbox calls now use it[/dim]\n")
 
     elif name == "/help":
         console.print(f"\n{_HELP_TEXT}\n")
@@ -997,14 +1162,14 @@ def chat(client, model: str, provider: str, resume: bool = False, cwd: str = Non
                 f"  [{_SILVER}]you[/{_SILVER}]  [{_GREEN}]›[/{_GREEN}]  "
             ).strip()
         except (KeyboardInterrupt, EOFError):
-            saved = _save_session(state["messages"], provider, state["model"])
+            saved = _save_session(state["messages"], state["provider"], state["model"])
             console.print(f"\n  [dim]session saved → {saved}[/dim]\n  [dim]goodbye[/dim]\n")
             break
 
         if not user_input:
             continue
         if user_input.lower() in ("exit", "quit", "bye", ":q"):
-            saved = _save_session(state["messages"], provider, state["model"])
+            saved = _save_session(state["messages"], state["provider"], state["model"])
             console.print(f"\n  [dim]session saved → {saved}[/dim]\n  [dim]goodbye[/dim]\n")
             break
 
@@ -1026,7 +1191,7 @@ def chat(client, model: str, provider: str, resume: bool = False, cwd: str = Non
             console.print(
                 f"\n  ⚠️   [bold {_AMBER}]PII detected in your message[/bold {_AMBER}]  "
                 f"[dim]{', '.join(active_pii)}[/dim]\n"
-                f"  [dim]This will be sent to the LLM provider ({provider}). Proceed?[/dim]\n"
+                f"  [dim]This will be sent to the LLM provider ({state['provider']}). Proceed?[/dim]\n"
                 f"  [dim](use /pii allow {active_pii[0]} to stop asking this session)[/dim]"
             )
             try:
@@ -1051,7 +1216,7 @@ def chat(client, model: str, provider: str, resume: bool = False, cwd: str = Non
             state["messages"] = _prune_context(state["messages"])
             if _iter > 0:
                 _show_acting(_iter + 1)
-            text, tool_calls = _stream(client, state["model"], state["messages"])
+            text, tool_calls = _stream(state["client"], state["model"], state["messages"])
 
             if tool_calls:
                 state["messages"].append({
@@ -1118,7 +1283,7 @@ def main():
 examples:
   viper                 first run: sign in with Google in your browser (or try 3 free queries)
   viper login           same as --login
-  viper logout          sign out and remove saved keys
+  viper logout          sign out of this computer (saved keys stay in your account)
   python agent.py --provider openrouter --model mistralai/mistral-7b-instruct:free
   python agent.py --provider anthropic --model anthropic/claude-3.5-haiku
   python agent.py --provider ollama --model llama3.2
@@ -1132,7 +1297,7 @@ examples:
     parser.add_argument("command", nargs="?", choices=["login", "logout"],
                         help="'viper login' and 'viper logout' work like --login and --logout")
     parser.add_argument("--login", action="store_true", help="Sign in with Google through your browser")
-    parser.add_argument("--logout", action="store_true", help="Sign out and remove saved keys")
+    parser.add_argument("--logout", action="store_true", help="Sign out (saved keys stay in your account)")
     parser.add_argument("--model", "-m", default=None)
     parser.add_argument("--api-key", default=None)
     parser.add_argument("--resume", "-r", action="store_true", help="Resume last saved session")

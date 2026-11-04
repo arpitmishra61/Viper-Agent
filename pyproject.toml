@@ -36,5 +36,5 @@ all = ["e2b>=1.0.0", "cryptography>=41.0.0", "pypdf>=4.0.0", "python-docx>=1.0.0
 viper = "agent:main"
 
 [tool.setuptools]
-py-modules = ["agent", "providers", "system_prompt", "orchestrator", "auth", "onboarding", "browser_auth"]
+py-modules = ["agent", "providers", "system_prompt", "orchestrator", "auth", "onboarding", "browser_auth", "pickers"]
 packages = ["tools"]

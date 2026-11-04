@@ -1,4 +1,4 @@
-"""Viper account: Supabase session storage and refresh, free-trial counter, sandbox grants.
+"""Viper account: Supabase session storage and refresh, saved API keys, free-trial counter, sandbox grants.
 
 Sign-in itself happens in the browser (browser_auth.py). No prompts here; onboarding.py owns the UI.
 """
@@ -82,13 +82,128 @@ def clear_profile() -> None:
         p.unlink(missing_ok=True)
 
 
+# ── API keys: stored in the user's Viper account (Supabase), never on disk ─────
+# Signed-in users: keys live encrypted in the backend (edge function `user-keys`).
+# Guests: keys last for this run only. Builds with no backend keep the old local profile storage.
+_session_keys: dict[str, str] = {}
+
+
+def keys_persist() -> bool:
+    """True when a saved key will still be there next time."""
+    return not backend_configured() or is_logged_in()
+
+
+def _keys_api(access: str, action: str, name: str | None = None, value: str | None = None) -> dict:
+    body: dict = {"action": action}
+    if name:
+        body["name"] = name
+    if value is not None:
+        body["value"] = value
+    try:
+        r = httpx.post(
+            f"{SUPABASE_URL.rstrip('/')}/functions/v1/user-keys",
+            json=body, headers=_headers(access), timeout=_TIMEOUT,
+        )
+    except httpx.HTTPError:
+        raise AuthError("Can't reach the Viper backend to sync your saved keys.")
+    if r.status_code >= 400:
+        try:
+            err = r.json().get("error")
+        except Exception:
+            err = None
+        if r.status_code == 404 and err == "not_found":
+            return {}
+        if err == "keys_not_configured":
+            raise AuthError("Key storage is not set up on the backend yet (KEYS_ENCRYPTION_SECRET).")
+        raise AuthError(f"Could not sync your saved keys: {_msg(r)}")
+    return r.json()
+
+
+def _account() -> dict | None:
+    return current_session() if backend_configured() else None
+
+
 def get_saved_key(name: str) -> str | None:
-    return load_profile().get("keys", {}).get(name)
+    if name in _session_keys:
+        return _session_keys[name]
+    s = _account()
+    if s:
+        value = _keys_api(s["access"], "get", name).get("value")
+        if value:
+            _session_keys[name] = value
+        return value
+    if not backend_configured():
+        return load_profile().get("keys", {}).get(name)
+    return None
 
 
 def save_key(name: str, value: str) -> None:
+    """Remember a key. Raises AuthError if it could not be stored in the account (it still works this run)."""
+    _session_keys[name] = value
+    s = _account()
+    if s:
+        _keys_api(s["access"], "set", name, value)
+    elif not backend_configured():
+        p = load_profile()
+        p.setdefault("keys", {})[name] = value
+        save_profile(p)
+
+
+def delete_key(name: str) -> None:
+    """Forget a saved key everywhere. Raises AuthError if the account copy could not be removed."""
+    _session_keys.pop(name, None)
+    p = load_profile()                       # copy left on disk by an older version, if any
+    if name in (p.get("keys") or {}):
+        p["keys"].pop(name)
+        if not p["keys"]:
+            p.pop("keys")
+        save_profile(p)
+    s = _account()
+    if s:
+        _keys_api(s["access"], "delete", name)
+
+
+def saved_key_names() -> set[str]:
+    """Names (never values) of the keys available without asking: this run plus the account."""
+    names = set(_session_keys)
+    s = _account()
+    if s:
+        names |= set(_keys_api(s["access"], "list").get("names", []))
+    elif not backend_configured():
+        names |= set(load_profile().get("keys", {}))
+    return names
+
+
+def migrate_local_keys() -> int:
+    """Move keys that older versions saved on disk into the account. Returns how many moved."""
+    s = _account()
     p = load_profile()
-    p.setdefault("keys", {})[name] = value
+    local = p.get("keys") or {}
+    if not (s and local):
+        return 0
+    moved = 0
+    try:
+        for name, value in list(local.items()):
+            _keys_api(s["access"], "set", name, value)
+            local.pop(name)
+            moved += 1
+    finally:   # keep whatever did not make it, drop what did
+        if moved:
+            if local:
+                p["keys"] = local
+            else:
+                p.pop("keys", None)
+            save_profile(p)
+    return moved
+
+
+def e2b_prompt_done() -> bool:
+    return bool(load_profile().get("e2b_asked"))
+
+
+def mark_e2b_prompt_done() -> None:
+    p = load_profile()
+    p["e2b_asked"] = True
     save_profile(p)
 
 
@@ -240,10 +355,15 @@ def current_session() -> dict | None:
 
 
 def logout() -> str | None:
-    """Sign out and wipe the profile (saved keys included). Returns the old email."""
+    """Sign out and wipe the local profile. Keys saved in the account stay there. Returns the old email."""
+    try:
+        migrate_local_keys()   # don't lose keys an older version left on disk
+    except AuthError:
+        pass
     p = load_profile()
     email = p.get("email")
     token = (p.get("tokens") or {}).get("access")
+    _session_keys.clear()
     if token and backend_configured():
         try:
             _post("/auth/v1/logout", None, token=token, params={"scope": "local"})

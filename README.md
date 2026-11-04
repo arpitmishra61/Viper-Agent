@@ -41,10 +41,17 @@ Then run `viper`. The first run asks you to **Sign in with Google** (your browse
 and you come back to the terminal), or to continue free for 3 queries. After that you pick a provider with the
 arrow keys and paste your own API key.
 
+**You only paste each key once.** While you are signed in, Viper saves it encrypted in your Viper account, so
+it is there next time and on any other computer you sign in on. You are not asked again, even after closing the
+terminal or running `viper logout`. (Without signing in, a pasted key lasts for that run only.)
+After sign-in Viper also offers, once and optionally, to save your own [E2B](https://e2b.dev) sandbox key.
+E2B gives Viper a throwaway cloud machine to install packages, run untrusted code and test fixes without touching
+your computer. Skip it to use the 3 free sandbox sessions, or add one later with `/e2b <key>`.
+
 ```bash
-viper            # first run: sign in with Google, pick a provider, paste your key
+viper            # first run: sign in with Google, pick a provider, paste your key (once)
 viper login      # sign in again
-viper logout     # sign out and remove saved keys
+viper logout     # sign out of this computer (saved keys stay in your account)
 ```
 
 Skip the prompts by exporting a key instead: `export OPENROUTER_API_KEY="sk-or-..."`.
@@ -122,7 +129,10 @@ The agent switches modes automatically when it detects an auth wall or CAPTCHA i
 ```
 /think      toggle visible thinking blocks on/off
 /clear      wipe conversation history
-/model      switch model mid-session:  /model anthropic/claude-3.5-haiku
+/sessions   list saved sessions, pick one and load it (your current chat is saved first)
+/model-select  pick a provider, then a model from its list (OpenRouter: search the full live list)
+/model      switch model by name on the current provider:  /model anthropic/claude-3.5-haiku
+/apikey     pick a provider, then add, replace or remove its API key (also covers the E2B sandbox key)
 /tools      list all tools
 /save       save session to JSON
 /cwd        show or change working directory
