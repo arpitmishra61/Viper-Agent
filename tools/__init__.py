@@ -1,4 +1,5 @@
 import tools.search as _search
+import tools.image_gen as _image_gen
 import tools.calculator as _calculator
 import tools.files as _files
 import tools.shell as _shell
@@ -36,6 +37,7 @@ TOOL_DEFINITIONS = (
     + _browser.DEFINITIONS
     + _http.DEFINITIONS
     + _github.DEFINITIONS
+    + _image_gen.DEFINITIONS
 )
 
 
@@ -144,5 +146,21 @@ def execute_tool(name: str, args: dict) -> str:
     if name == "github_clone_repo":
         return _github.github_clone_repo(
             args.get("owner", ""), args.get("repo", ""), args.get("branch", ""),
+        )
+    if name == "generate_image":
+        return _image_gen.generate_image(
+            prompt=args.get("prompt", ""),
+            filename=args.get("filename", "generated-image"),
+            width=args.get("width", 1024),
+            height=args.get("height", 1024),
+            model=args.get("model", "flux"),
+        )
+    if name == "html_to_image":
+        return _image_gen.html_to_image(
+            source=args.get("source", ""),
+            output_filename=args.get("output_filename", "screenshot"),
+            width=args.get("width", 1200),
+            height=args.get("height", 0),
+            full_page=args.get("full_page", True),
         )
     return f"Unknown tool: {name}"

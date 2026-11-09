@@ -710,8 +710,10 @@ def _run_tools(calls: list[tuple[str, dict, str]], state: dict | None = None) ->
 
         # 1. Warn about PII in tool output (informational; model still sees it)
         pii = detect_pii(result)
-        if pii.has_pii:
-            _show_pii_found(name, pii.found)
+        suppressed_types: set = (state or {}).get("pii_suppressed", set())
+        active_pii = [t for t in pii.found if t not in suppressed_types]
+        if active_pii:
+            _show_pii_found(name, active_pii)
 
         # 2. Detect prompt-injection in tool output; ask user before injecting
         #    adversarial content into the model's context.

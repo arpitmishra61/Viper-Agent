@@ -1,12 +1,15 @@
 import os
 import re
 import subprocess
+import sys
 
 from tools.guardrails import check_command
 from tools.state import get_cwd, set_cwd
 
 _DEFAULT_TIMEOUT = 60
 _CD_RE = re.compile(r'^cd\s*(.*)', re.IGNORECASE)
+# Trailing & (background operator) — works on Unix; we emulate it on Windows
+_BG_RE = re.compile(r'&\s*$')
 
 # When set by agent.py, run_shell calls this for each output line in real time.
 # None = use the original capture_output approach.
@@ -39,10 +42,40 @@ def run_shell(command: str, cwd: str = None, timeout: int = _DEFAULT_TIMEOUT,
             return f"Changed directory to: {new_path}"
         return f"Directory not found: {new_path}"
 
+    # Detect background operator (&) and launch detached instead of blocking
+    if _BG_RE.search(cmd):
+        bg_cmd = _BG_RE.sub("", cmd).strip()
+        return _run_background(bg_cmd, effective_cwd)
+
     cb = _stream_cb  # snapshot — avoid TOCTOU if another thread clears it mid-run
     if cb is not None:
         return _run_streaming(command, effective_cwd, min(timeout, 300), cb)
     return _run_captured(command, effective_cwd, min(timeout, 300))
+
+
+def _run_background(command: str, cwd: str) -> str:
+    """Launch a process detached from the agent — returns immediately with the PID."""
+    try:
+        kwargs: dict = {
+            "shell": True,
+            "cwd": cwd,
+            "stdin": subprocess.DEVNULL,
+            "stdout": subprocess.DEVNULL,
+            "stderr": subprocess.DEVNULL,
+        }
+        if sys.platform == "win32":
+            kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
+        else:
+            kwargs["start_new_session"] = True
+
+        proc = subprocess.Popen(command, **kwargs)
+        return (
+            f"Started in background (PID {proc.pid}): {command}\n"
+            "Process is detached — it will keep running after this session ends. "
+            "To stop it, use: kill {proc.pid} (Unix) or taskkill /PID {proc.pid} /F (Windows)"
+        ).replace("{proc.pid}", str(proc.pid))
+    except Exception as e:
+        return f"Error starting background process: {e}"
 
 
 def _run_captured(command: str, cwd: str, timeout: int) -> str:
@@ -68,6 +101,8 @@ def _run_captured(command: str, cwd: str, timeout: int) -> str:
 
 def _run_streaming(command: str, cwd: str, timeout: int, cb) -> str:
     """Streaming path: merge stdout+stderr and call cb() for each line as it arrives."""
+    import threading
+
     try:
         proc = subprocess.Popen(
             command, shell=True,
@@ -76,17 +111,28 @@ def _run_streaming(command: str, cwd: str, timeout: int, cb) -> str:
             cwd=cwd,
         )
         lines: list[str] = []
-        try:
+
+        def _read():
             for raw in proc.stdout:
                 line = raw.rstrip("\n").rstrip("\r")
                 lines.append(line)
                 cb(line)
-            proc.wait(timeout=2)  # stdout exhausted → process already done
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            return f"Timeout: command exceeded {timeout}s"
 
-        if proc.returncode != 0:
+        reader = threading.Thread(target=_read, daemon=True)
+        reader.start()
+        reader.join(timeout=timeout)
+
+        if reader.is_alive():
+            proc.kill()
+            reader.join(timeout=2)
+            lines.append(f"[Timeout: command exceeded {timeout}s — process killed]")
+        else:
+            try:
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+
+        if proc.returncode not in (None, 0):
             lines.append(f"Exit code: {proc.returncode}")
         return "\n".join(lines) if lines else "(command completed, no output)"
     except Exception as e:

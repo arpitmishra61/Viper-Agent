@@ -45,7 +45,7 @@ def _get_sandbox():
             )
         key, free = _api_key()
         # free grants get a shorter lifetime than a user's own key
-        _sbx = Sandbox(api_key=key, timeout=1800 if free else 3600)
+        _sbx = Sandbox.create(api_key=key, timeout=1800 if free else 3600)
         atexit.register(_kill_sandbox)
     return _sbx
 
